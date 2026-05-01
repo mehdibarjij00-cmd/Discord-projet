@@ -33,3 +33,4 @@ io.on('connection', (socket) => {
     console.log(`Utilisateur déconnecté : ${socket.id}`);
   });
 });
+// Démarrer le serveur
