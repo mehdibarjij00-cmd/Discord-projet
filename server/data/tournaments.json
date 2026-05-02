@@ -1,0 +1,26 @@
+{
+  "eb724de94acfa765": {
+    "id": "eb724de94acfa765",
+    "name": "INTER CAMPUS",
+    "gameId": "pong",
+    "format": "elimination",
+    "maxPlayers": 3,
+    "status": "open",
+    "organizerId": "1777685883784",
+    "organizerName": "mehdiiiiiiiiiiiiiiii",
+    "groupId": null,
+    "groupName": null,
+    "participants": [
+      {
+        "id": "1777685883784",
+        "username": "mehdiiiiiiiiiiiiiiii",
+        "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=mehdiiiiiiiiiiiiiiii"
+      }
+    ],
+    "bracket": null,
+    "standings": [],
+    "winner": null,
+    "createdAt": 1777759520267,
+    "startedAt": null
+  }
+}

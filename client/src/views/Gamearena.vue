@@ -1,8 +1,79 @@
 <script setup>
-import { ref, nextTick, onMounted, onUnmounted, computed } from 'vue';
+import { ref, nextTick, onMounted, onUnmounted, computed, watch } from 'vue';
 import { io } from 'socket.io-client';
+import Uno from './Uno.vue';
 
 const Swal = window.Swal;
+
+// -------------------------------------------------------
+// PSEUDO & PROFIL JOUEUR
+// -------------------------------------------------------
+const localPlayer = ref({ name: '', avatar: '', elo: 1000, wins: 0, losses: 0, history: [] });
+const showProfileSetup = ref(false);
+const pseudoInput = ref('');
+const avatarSeed = ref(Math.random().toString(36).substring(2, 8));
+
+const AVATAR_STYLES = ['avataaars', 'bottts', 'pixel-art', 'lorelei', 'adventurer'];
+const selectedAvatarStyle = ref('avataaars');
+
+const avatarUrl = computed(() =>
+  `https://api.dicebear.com/7.x/${selectedAvatarStyle.value}/svg?seed=${avatarSeed.value}`
+);
+
+const initPlayer = () => {
+  const saved = localStorage.getItem('arenalink_player');
+  if (saved) {
+    localPlayer.value = JSON.parse(saved);
+    showProfileSetup.value = false;
+  } else {
+    showProfileSetup.value = true;
+  }
+};
+
+const saveProfile = () => {
+  if (!pseudoInput.value.trim()) return;
+  localPlayer.value = {
+    name: pseudoInput.value.trim(),
+    avatar: avatarUrl.value,
+    elo: 1000,
+    wins: 0,
+    losses: 0,
+    history: [],
+  };
+  localStorage.setItem('arenalink_player', JSON.stringify(localPlayer.value));
+  showProfileSetup.value = false;
+};
+
+const savePlayerLocal = () => {
+  localStorage.setItem('arenalink_player', JSON.stringify(localPlayer.value));
+};
+
+// ELO calculation
+const calcElo = (myElo, oppElo, won) => {
+  const K = 32;
+  const expected = 1 / (1 + Math.pow(10, (oppElo - myElo) / 400));
+  const score = won ? 1 : 0;
+  return Math.round(myElo + K * (score - expected));
+};
+
+const recordResult = (won, game, score) => {
+  const oppElo = 1000; // estimé si pas connu
+  const newElo = calcElo(localPlayer.value.elo, oppElo, won);
+  const eloDiff = newElo - localPlayer.value.elo;
+  localPlayer.value.elo = newElo;
+  if (won) localPlayer.value.wins++;
+  else localPlayer.value.losses++;
+  localPlayer.value.history.unshift({
+    game,
+    result: won ? 'Victoire' : 'Défaite',
+    score,
+    elo: newElo,
+    eloDiff,
+    date: new Date().toLocaleDateString('fr-FR'),
+  });
+  if (localPlayer.value.history.length > 20) localPlayer.value.history.pop();
+  savePlayerLocal();
+};
 
 // -------------------------------------------------------
 // ÉTATS PRINCIPAUX
@@ -16,15 +87,74 @@ const games = [
   { id: 'pong',  name: 'Neon Pong',   icon: '🏓', color: 'from-blue-500 to-indigo-600',   desc: '2 joueurs • Classique' },
   { id: 'xo',   name: 'Tic-Tac-Toe', icon: '❌',  color: 'from-pink-500 to-rose-600',     desc: '2 joueurs • Tactique'  },
   { id: 'snake', name: 'Cyber Snake', icon: '🐍', color: 'from-green-500 to-emerald-600', desc: '1 joueur • Solo'       },
+  { id: 'uno',   name: 'UNO',         icon: '🎴', color: 'from-red-500 via-yellow-500 to-blue-500', desc: '2-4 joueurs • Cartes' },
 ];
 
 const currentRoom = ref({ code: '', players: [], spectators: [] });
+
+// -------------------------------------------------------
+// NOTIFICATIONS
+// -------------------------------------------------------
+const notifications = ref([]);
+let notifId = 0;
+
+const pushNotif = (msg, type = 'info', duration = 3500) => {
+  const id = notifId++;
+  notifications.value.unshift({ id, msg, type });
+  setTimeout(() => {
+    notifications.value = notifications.value.filter(n => n.id !== id);
+  }, duration);
+};
+
+const notifIcon = (type) => ({ info: 'ℹ️', success: '✅', warning: '⚠️', error: '❌', invite: '🎮', elo: '📈' }[type] || 'ℹ️');
+
+// -------------------------------------------------------
+// ROOMS PUBLIQUES
+// -------------------------------------------------------
+const publicRooms = ref([]);
+const showPublicRooms = ref(false);
+
+const refreshPublicRooms = () => {
+  if (socket) socket.emit('list-public-rooms');
+};
+
+// -------------------------------------------------------
+// RÉACTIONS EMOJI
+// -------------------------------------------------------
+const EMOJIS = ['🔥', '😱', '🤝', '👏', '💀', '😂', '🏆', '⚡',' 🫏 ',' 🤟 ',' 👎 ','🖕',' 👿 '];
+const showEmojiPicker = ref(false);
+const floatingEmojis = ref([]);
+let emojiId = 0;
+
+const sendReaction = (emoji) => {
+  showEmojiPicker.value = false;
+  addFloatingEmoji(emoji);
+  if (socket) {
+    socket.emit('game-action', {
+      roomCode: currentRoom.value.code,
+      game: 'reaction',
+      action: 'emoji',
+      emoji,
+      from: localPlayer.value.name,
+    });
+  }
+};
+
+const addFloatingEmoji = (emoji) => {
+  const id = emojiId++;
+  const x = 20 + Math.random() * 60;
+  floatingEmojis.value.push({ id, emoji, x });
+  setTimeout(() => {
+    floatingEmojis.value = floatingEmojis.value.filter(e => e.id !== id);
+  }, 2000);
+};
 
 // -------------------------------------------------------
 // SIDEBAR — CHANNELS & NAVIGATION
 // -------------------------------------------------------
 const sidebarOpen    = ref(true);
 const activeChannel  = ref('general');
+const activeSideTab  = ref('channels'); // 'channels' | 'profile' | 'leaderboard'
 
 const channels = [
   { id: 'general',     label: 'général',      icon: '💬' },
@@ -45,7 +175,8 @@ const sendChannelMessage = () => {
   const text = channelInput.value.trim();
   if (!text) return;
   channelMessages.value[activeChannel.value].push({
-    sender: 'Moi',
+    sender: localPlayer.value.name || 'Moi',
+    avatar: localPlayer.value.avatar,
     text,
     time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     self: true,
@@ -53,7 +184,11 @@ const sendChannelMessage = () => {
   if (socket) {
     socket.emit('channel-message', {
       channel: activeChannel.value,
-      message: { sender: currentRoom.value.players[0]?.name || 'Joueur', text },
+      message: {
+        sender: localPlayer.value.name || 'Joueur',
+        avatar: localPlayer.value.avatar,
+        text,
+      },
     });
   }
   channelInput.value = '';
@@ -73,7 +208,8 @@ const sendRoomMessage = () => {
   const text = chatMessage.value.trim();
   if (!text) return;
   const msgObj = {
-    sender: 'Moi',
+    sender: localPlayer.value.name || 'Moi',
+    avatar: localPlayer.value.avatar,
     text,
     time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     self: true,
@@ -84,7 +220,7 @@ const sendRoomMessage = () => {
       roomCode: currentRoom.value.code,
       game: 'chat',
       action: 'message',
-      message: { ...msgObj, sender: currentRoom.value.players.find(p => p.name === 'Toi')?.name || 'Joueur' },
+      message: { ...msgObj, self: false },
     });
   }
   chatMessage.value = '';
@@ -95,21 +231,50 @@ const sendRoomMessage = () => {
 };
 
 // -------------------------------------------------------
-// SOCKET.IO — CONNEXION MULTIJOUEUR
+// LEADERBOARD (session locale + socket global)
+// -------------------------------------------------------
+const globalLeaderboard = ref([]);
+
+const updateLeaderboard = () => {
+  if (socket) {
+    socket.emit('update-leaderboard', {
+      name: localPlayer.value.name,
+      avatar: localPlayer.value.avatar,
+      elo: localPlayer.value.elo,
+      wins: localPlayer.value.wins,
+      losses: localPlayer.value.losses,
+    });
+  }
+};
+
+// ELO rank label
+const eloRank = (elo) => {
+  if (elo >= 1400) return { label: 'Diamant 💎', color: 'text-cyan-400' };
+  if (elo >= 1200) return { label: 'Platine 🔷', color: 'text-blue-400' };
+  if (elo >= 1100) return { label: 'Or 🥇', color: 'text-yellow-400' };
+  if (elo >= 1000) return { label: 'Argent 🥈', color: 'text-gray-300' };
+  return { label: 'Bronze 🥉', color: 'text-orange-400' };
+};
+
+// -------------------------------------------------------
+// SOCKET.IO
 // -------------------------------------------------------
 let socket = null;
 
 onMounted(() => {
+  initPlayer();
   socket = io('http://localhost:3001');
 
   socket.on('game-status', (data) => {
     if (data.status === 'ready') {
       if (currentRoom.value.players.length === 1) {
         currentRoom.value.players.push({
-          name: 'Adversaire',
+          name: data.playerName || 'Adversaire',
           role: 'Joueur 2',
-          avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Guest`,
+          avatar: data.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=Guest`,
+          elo: data.elo || 1000,
         });
+        pushNotif(`${data.playerName || 'Un joueur'} a rejoint la salle !`, 'success');
       }
     } else if (data.status === 'error') {
       Swal.fire({ icon: 'error', title: 'Erreur', text: data.message, background: '#111827', color: '#f9fafb', confirmButtonColor: '#6366f1' });
@@ -123,10 +288,49 @@ onMounted(() => {
     if (channelMessages.value[data.channel]) {
       channelMessages.value[data.channel].push({
         sender: data.message.sender,
+        avatar: data.message.avatar,
         text:   data.message.text,
         time:   new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
         self:   false,
       });
+    }
+  });
+
+  // Invitation reçue
+  socket.on('room-invite', (data) => {
+    pushNotif(`🎮 ${data.from} t'invite à rejoindre ${data.roomCode} !`, 'invite', 6000);
+    Swal.fire({
+      icon: 'info',
+      title: `🎮 Invitation de ${data.from}`,
+      text: `Rejoindre la salle ${data.roomCode} (${data.game}) ?`,
+      background: '#111827', color: '#f9fafb',
+      confirmButtonColor: '#6366f1', confirmButtonText: 'Rejoindre !',
+      showCancelButton: true, cancelButtonText: 'Refuser',
+    }).then((res) => {
+      if (res.isConfirmed) {
+        roomCode.value = data.roomCode;
+        const g = games.find(g => g.id === data.gameId) || games[0];
+        selectedGame.value = g;
+        joinRoom();
+      }
+    });
+  });
+
+  // Rooms publiques
+  socket.on('public-rooms-list', (data) => {
+    publicRooms.value = data.rooms || [];
+  });
+
+  // Leaderboard global
+  socket.on('leaderboard-update', (data) => {
+    globalLeaderboard.value = data.players || [];
+  });
+
+  // Joueur rejoint en spectateur
+  socket.on('spectator-joined', (data) => {
+    pushNotif(`👁 ${data.name} regarde la partie`, 'info');
+    if (!currentRoom.value.spectators.find(s => s.name === data.name)) {
+      currentRoom.value.spectators.push({ name: data.name, avatar: data.avatar });
     }
   });
 
@@ -139,6 +343,12 @@ onMounted(() => {
       });
     }
 
+    // Réactions emoji
+    if (data.game === 'reaction' && data.action === 'emoji') {
+      addFloatingEmoji(data.emoji);
+      pushNotif(`${data.from} réagit ${data.emoji}`, 'info', 2000);
+    }
+
     if (data.game === 'xo') {
       if (data.action === 'play')  xoPlay(data.idx, true);
       if (data.action === 'reset') xoReset(true);
@@ -146,11 +356,9 @@ onMounted(() => {
 
     if (data.game === 'pong') {
       if (data.action === 'host-update') {
-        pBall.x = data.ball.x;
-        pBall.y = data.ball.y;
-        pBall.dx = data.ball.dx;
-        pBall.dy = data.ball.dy;
-        pPad1.y  = data.pad1Y;
+        pBall.x = data.ball.x; pBall.y = data.ball.y;
+        pBall.dx = data.ball.dx; pBall.dy = data.ball.dy;
+        pPad1.y = data.pad1Y;
         pongScore.value = data.score;
       }
       if (data.action === 'guest-update') { pPad2.y = data.pad2Y; }
@@ -161,16 +369,15 @@ onMounted(() => {
       }
     }
   });
+
+  // Rafraîchir leaderboard toutes les 10s
+  setInterval(() => { if (socket) socket.emit('get-leaderboard'); }, 10000);
+  socket.emit('get-leaderboard');
 });
 
 // -------------------------------------------------------
 // MODE SPECTATEUR
 // -------------------------------------------------------
-const spectatorBanner = computed(() => isSpectator.value
-  ? { show: true, msg: '👁 Mode Spectateur — tu regardes sans pouvoir jouer' }
-  : { show: false, msg: '' }
-);
-
 const guardSpectator = (callback) => {
   if (isSpectator.value) {
     Swal.fire({
@@ -192,17 +399,32 @@ const selectGame = (game) => {
   currentStep.value  = 'join';
 };
 
-const createRoom = () => {
+const createRoom = (isPublic = false) => {
   const code = `${selectedGame.value.id.toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
   currentRoom.value = {
     code,
-    players: [{ name: 'Toi', role: 'Joueur 1', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Host` }],
+    isPublic,
+    players: [{
+      name: localPlayer.value.name || 'Toi',
+      role: 'Joueur 1',
+      avatar: localPlayer.value.avatar,
+      elo: localPlayer.value.elo,
+    }],
     spectators: [],
   };
   isSpectator.value = false;
   currentStep.value  = 'lobby';
   roomMessages.value = [];
-  if (socket) socket.emit('join-game-room', code);
+  if (socket) socket.emit('join-game-room', {
+    code,
+    isPublic,
+    gameId: selectedGame.value.id,
+    gameName: selectedGame.value.name,
+    playerName: localPlayer.value.name,
+    avatar: localPlayer.value.avatar,
+    elo: localPlayer.value.elo,
+  });
+  pushNotif(`Salle ${code} créée !`, 'success');
 };
 
 const joinRoom = () => {
@@ -213,13 +435,26 @@ const joinRoom = () => {
   }
   currentRoom.value.code = code;
   currentRoom.value.players = [
-    { name: 'Adversaire (Hôte)', role: 'Joueur 1', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Host` },
-    { name: 'Toi',               role: 'Joueur 2', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Guest` },
+    { name: 'Hôte', role: 'Joueur 1', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Host`, elo: 1000 },
+    { name: localPlayer.value.name || 'Toi', role: 'Joueur 2', avatar: localPlayer.value.avatar, elo: localPlayer.value.elo },
   ];
   isSpectator.value  = false;
   currentStep.value  = 'lobby';
   roomMessages.value = [];
-  if (socket) socket.emit('join-game-room', code);
+  if (socket) socket.emit('join-game-room', {
+    code,
+    playerName: localPlayer.value.name,
+    avatar: localPlayer.value.avatar,
+    elo: localPlayer.value.elo,
+  });
+};
+
+const joinPublicRoom = (room) => {
+  showPublicRooms.value = false;
+  roomCode.value = room.code;
+  const g = games.find(g => g.id === room.gameId) || games[0];
+  selectedGame.value = g;
+  joinRoom();
 };
 
 const joinAsSpectator = () => {
@@ -228,12 +463,12 @@ const joinAsSpectator = () => {
     Swal.fire({
       title: '👁 Rejoindre en spectateur',
       input: 'text',
-      inputPlaceholder: 'Code de la salle (ex: PONG-AB12)',
-      inputAttributes: { style: 'text-transform:uppercase; font-family:monospace; letter-spacing:0.1em;' },
+      inputPlaceholder: 'Code de la salle',
+      inputAttributes: { style: 'text-transform:uppercase; font-family:monospace;' },
       background: '#111827', color: '#f9fafb', confirmButtonColor: '#eab308',
       confirmButtonText: 'Rejoindre', showCancelButton: true, cancelButtonText: 'Annuler',
       preConfirm: (val) => {
-        if (!val.trim()) { Swal.showValidationMessage('Entre un code valide'); }
+        if (!val.trim()) Swal.showValidationMessage('Entre un code valide');
         return val.trim().toUpperCase();
       },
     }).then((res) => {
@@ -251,31 +486,47 @@ const _doJoinSpectator = (code) => {
   const prefix = code.split('-')[0].toLowerCase();
   const matchedGame = games.find(g => g.id === prefix) || games[0];
   selectedGame.value = matchedGame;
-
   currentRoom.value = {
     code,
     players: [
-      { name: 'Joueur 1 (Hôte)', role: 'Joueur 1', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Host` },
-      { name: 'Joueur 2',        role: 'Joueur 2', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Guest` },
+      { name: 'Joueur 1 (Hôte)', role: 'Joueur 1', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Host`, elo: 1000 },
+      { name: 'Joueur 2',        role: 'Joueur 2', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Guest`, elo: 1000 },
     ],
-    spectators: [{ name: 'Toi (Spectateur)', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Watcher` }],
+    spectators: [{ name: localPlayer.value.name || 'Spectateur', avatar: localPlayer.value.avatar }],
   };
   isSpectator.value  = true;
   currentStep.value  = 'lobby';
   roomMessages.value = [];
-  if (socket) socket.emit('join-game-room', code);
-
-  Swal.fire({
-    icon: 'success', title: '👁 Mode Spectateur',
-    text: `Tu rejoins la salle ${code} en tant que spectateur.`,
-    background: '#111827', color: '#f9fafb', confirmButtonColor: '#eab308',
-    timer: 2000, showConfirmButton: false,
+  if (socket) socket.emit('join-game-room', {
+    code, spectator: true,
+    playerName: localPlayer.value.name,
+    avatar: localPlayer.value.avatar,
   });
+  pushNotif(`Tu regardes la salle ${code}`, 'info');
+};
+
+// Lien d'invitation
+const copyInviteLink = () => {
+  const link = `${window.location.origin}?join=${currentRoom.value.code}`;
+  navigator.clipboard.writeText(link);
+  pushNotif('Lien d\'invitation copié !', 'success');
+};
+
+const sendSocketInvite = (targetName) => {
+  if (!socket) return;
+  socket.emit('send-invite', {
+    to: targetName,
+    from: localPlayer.value.name,
+    roomCode: currentRoom.value.code,
+    gameId: selectedGame.value?.id,
+    game: selectedGame.value?.name,
+  });
+  pushNotif(`Invitation envoyée à ${targetName}`, 'success');
 };
 
 const copyCode = () => {
   navigator.clipboard.writeText(currentRoom.value.code);
-  Swal.fire({ icon: 'success', title: 'Code copié !', text: currentRoom.value.code, background: '#111827', color: '#f9fafb', confirmButtonColor: '#6366f1', timer: 1500, showConfirmButton: false });
+  pushNotif('Code copié !', 'success');
 };
 
 const startGame = () => {
@@ -312,12 +563,11 @@ const stopAllGames = () => {
 onUnmounted(() => { stopAllGames(); if (socket) socket.disconnect(); });
 
 // -------------------------------------------------------
-// PONG — MULTIJOUEUR AUTORITAIRE
+// PONG
 // -------------------------------------------------------
 const canvasRef = ref(null);
 const pongScore = ref({ p1: 0, p2: 0 });
 const MAX_SCORE = 7;
-
 let pBall = { x: 400, y: 225, r: 10, dx: 5, dy: 3.5 };
 let pPad1 = { x: 20,  y: 180 };
 let pPad2 = { x: 768, y: 180 };
@@ -329,18 +579,14 @@ const initNeonPong = () => {
   const W = 800, H = 450;
   canvas.width = W; canvas.height = H;
   const PADDLE_W = 12, PADDLE_H = 90, SPEED_INC = 0.4;
-
-  const isHost  = currentRoom.value.players[0]?.name === 'Toi';
-  const isGuest = currentRoom.value.players[1]?.name === 'Toi';
-
+  const isHost  = currentRoom.value.players[0]?.name === localPlayer.value.name;
+  const isGuest = currentRoom.value.players[1]?.name === localPlayer.value.name;
   pPad1 = { x: 20, y: H / 2 - PADDLE_H / 2 };
   pPad2 = { x: W - 32, y: H / 2 - PADDLE_H / 2 };
   const keys = {};
-
   canvas.setAttribute('tabindex', '0');
   canvas.style.outline = 'none';
   if (!isSpectator.value) canvas.focus();
-
   const PONG_KEYS = ['w', 'W', 's', 'S', 'ArrowUp', 'ArrowDown'];
   const onKey = (e) => {
     if (['INPUT', 'TEXTAREA'].includes(e.target?.tagName)) return;
@@ -350,84 +596,62 @@ const initNeonPong = () => {
   };
   window.addEventListener('keydown', onKey);
   window.addEventListener('keyup',   onKey);
-
-  const resetBall = (dir = 1) => {
-    pBall = {
-      x: W / 2, y: H / 2, r: 10,
-      dx: (4 + Math.random()) * dir,
-      dy: (3 + Math.random() * 2) * (Math.random() > 0.5 ? 1 : -1),
-    };
-  };
-  if (isHost) resetBall(1);
-
+  if (isHost) {
+    pBall = { x: W/2, y: H/2, r: 10, dx: (4+Math.random()), dy: (3+Math.random()*2)*(Math.random()>0.5?1:-1) };
+  }
   const draw = () => {
-    ctx.fillStyle = 'rgba(15, 23, 42, 0.92)';
+    ctx.fillStyle = 'rgba(15,23,42,0.92)';
     ctx.fillRect(0, 0, W, H);
-
-    ctx.setLineDash([14, 10]);
-    ctx.beginPath(); ctx.moveTo(W / 2, 0); ctx.lineTo(W / 2, H);
-    ctx.strokeStyle = '#1e293b'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.setLineDash([14,10]);
+    ctx.beginPath(); ctx.moveTo(W/2,0); ctx.lineTo(W/2,H);
+    ctx.strokeStyle='#1e293b'; ctx.lineWidth=2; ctx.stroke();
     ctx.setLineDash([]);
-
-    const drawPaddle = (x, y, color, glow) => {
-      ctx.shadowBlur = 18; ctx.shadowColor = glow; ctx.fillStyle = color;
-      ctx.beginPath(); ctx.roundRect(x, y, PADDLE_W, PADDLE_H, 6); ctx.fill();
-      ctx.shadowBlur = 0;
+    const drawPaddle = (x,y,color,glow) => {
+      ctx.shadowBlur=18; ctx.shadowColor=glow; ctx.fillStyle=color;
+      ctx.beginPath(); ctx.roundRect(x,y,PADDLE_W,PADDLE_H,6); ctx.fill();
+      ctx.shadowBlur=0;
     };
-    drawPaddle(pPad1.x, pPad1.y, '#818cf8', '#6366f1');
-    drawPaddle(pPad2.x, pPad2.y, '#fb7185', '#f43f5e');
-
-    ctx.shadowBlur = 20; ctx.shadowColor = '#ffffff'; ctx.fillStyle = '#ffffff';
-    ctx.beginPath(); ctx.arc(pBall.x, pBall.y, pBall.r, 0, Math.PI * 2); ctx.fill();
-    ctx.shadowBlur = 0;
-
-    ctx.font = 'bold 40px monospace';
-    ctx.fillStyle = '#818cf8'; ctx.fillText(pongScore.value.p1, W / 2 - 70, 60);
-    ctx.fillStyle = '#fb7185'; ctx.fillText(pongScore.value.p2, W / 2 + 30, 60);
-
+    drawPaddle(pPad1.x,pPad1.y,'#818cf8','#6366f1');
+    drawPaddle(pPad2.x,pPad2.y,'#fb7185','#f43f5e');
+    ctx.shadowBlur=20; ctx.shadowColor='#ffffff'; ctx.fillStyle='#ffffff';
+    ctx.beginPath(); ctx.arc(pBall.x,pBall.y,pBall.r,0,Math.PI*2); ctx.fill();
+    ctx.shadowBlur=0;
+    ctx.font='bold 40px monospace';
+    ctx.fillStyle='#818cf8'; ctx.fillText(pongScore.value.p1,W/2-70,60);
+    ctx.fillStyle='#fb7185'; ctx.fillText(pongScore.value.p2,W/2+30,60);
     if (!isSpectator.value) {
       if (isHost) {
-        if ((keys['w'] || keys['W'] || keys['ArrowUp'])   && pPad1.y > 0)            pPad1.y -= 7;
-        if ((keys['s'] || keys['S'] || keys['ArrowDown']) && pPad1.y + PADDLE_H < H) pPad1.y += 7;
-
-        pBall.x += pBall.dx; pBall.y += pBall.dy;
-        if (pBall.y - pBall.r < 0)  { pBall.y = pBall.r;     pBall.dy =  Math.abs(pBall.dy); }
-        if (pBall.y + pBall.r > H)  { pBall.y = H - pBall.r; pBall.dy = -Math.abs(pBall.dy); }
-
-        if (pBall.x - pBall.r < pPad1.x + PADDLE_W && pBall.y > pPad1.y && pBall.y < pPad1.y + PADDLE_H && pBall.dx < 0) {
-          pBall.dx =  Math.abs(pBall.dx) + SPEED_INC;
-          pBall.dy = ((pBall.y - (pPad1.y + PADDLE_H / 2)) / (PADDLE_H / 2)) * 6;
+        if ((keys['w']||keys['W']||keys['ArrowUp'])   && pPad1.y>0)           pPad1.y-=7;
+        if ((keys['s']||keys['S']||keys['ArrowDown']) && pPad1.y+PADDLE_H<H)  pPad1.y+=7;
+        pBall.x+=pBall.dx; pBall.y+=pBall.dy;
+        if (pBall.y-pBall.r<0)  { pBall.y=pBall.r;     pBall.dy= Math.abs(pBall.dy); }
+        if (pBall.y+pBall.r>H)  { pBall.y=H-pBall.r;   pBall.dy=-Math.abs(pBall.dy); }
+        if (pBall.x-pBall.r<pPad1.x+PADDLE_W && pBall.y>pPad1.y && pBall.y<pPad1.y+PADDLE_H && pBall.dx<0) {
+          pBall.dx=Math.abs(pBall.dx)+SPEED_INC;
+          pBall.dy=((pBall.y-(pPad1.y+PADDLE_H/2))/(PADDLE_H/2))*6;
         }
-        if (pBall.x + pBall.r > pPad2.x && pBall.y > pPad2.y && pBall.y < pPad2.y + PADDLE_H && pBall.dx > 0) {
-          pBall.dx = -(Math.abs(pBall.dx) + SPEED_INC);
-          pBall.dy = ((pBall.y - (pPad2.y + PADDLE_H / 2)) / (PADDLE_H / 2)) * 6;
+        if (pBall.x+pBall.r>pPad2.x && pBall.y>pPad2.y && pBall.y<pPad2.y+PADDLE_H && pBall.dx>0) {
+          pBall.dx=-(Math.abs(pBall.dx)+SPEED_INC);
+          pBall.dy=((pBall.y-(pPad2.y+PADDLE_H/2))/(PADDLE_H/2))*6;
         }
-
-        if (pBall.x < 0) { pongScore.value.p2++; checkPongWinner(-1); return; }
-        if (pBall.x > W) { pongScore.value.p1++; checkPongWinner(1);  return; }
-
+        if (pBall.x<0) { pongScore.value.p2++; checkPongWinner(-1); return; }
+        if (pBall.x>W) { pongScore.value.p1++; checkPongWinner(1);  return; }
         if (socket) socket.emit('game-action', {
-          roomCode: currentRoom.value.code, game: 'pong', action: 'host-update',
-          ball: { x: pBall.x, y: pBall.y, dx: pBall.dx, dy: pBall.dy },
-          pad1Y: pPad1.y, score: pongScore.value,
+          roomCode: currentRoom.value.code, game:'pong', action:'host-update',
+          ball:{x:pBall.x,y:pBall.y,dx:pBall.dx,dy:pBall.dy},
+          pad1Y:pPad1.y, score:pongScore.value,
         });
-
       } else if (isGuest) {
-        if ((keys['w'] || keys['W'] || keys['ArrowUp'])   && pPad2.y > 0)            pPad2.y -= 7;
-        if ((keys['s'] || keys['S'] || keys['ArrowDown']) && pPad2.y + PADDLE_H < H) pPad2.y += 7;
-
-        pBall.x += pBall.dx;
-        pBall.y += pBall.dy;
-
+        if ((keys['w']||keys['W']||keys['ArrowUp'])   && pPad2.y>0)           pPad2.y-=7;
+        if ((keys['s']||keys['S']||keys['ArrowDown']) && pPad2.y+PADDLE_H<H)  pPad2.y+=7;
+        pBall.x+=pBall.dx; pBall.y+=pBall.dy;
         if (socket) socket.emit('game-action', {
-          roomCode: currentRoom.value.code, game: 'pong', action: 'guest-update', pad2Y: pPad2.y,
+          roomCode: currentRoom.value.code, game:'pong', action:'guest-update', pad2Y:pPad2.y,
         });
       }
     }
-
     pongAnimId = requestAnimationFrame(draw);
   };
-
   draw();
   window.__pongCleanup = () => {
     window.removeEventListener('keydown', onKey);
@@ -436,236 +660,356 @@ const initNeonPong = () => {
 };
 
 const checkPongWinner = (dir) => {
-  if (pongScore.value.p1 >= MAX_SCORE || pongScore.value.p2 >= MAX_SCORE) {
-    const winner = pongScore.value.p1 >= MAX_SCORE ? 'Joueur 1' : 'Joueur 2';
-    if (socket) socket.emit('game-action', { roomCode: currentRoom.value.code, game: 'pong', action: 'pong-win', winner });
+  if (pongScore.value.p1>=MAX_SCORE || pongScore.value.p2>=MAX_SCORE) {
+    const winner = pongScore.value.p1>=MAX_SCORE ? 'Joueur 1' : 'Joueur 2';
+    const iWon = (winner==='Joueur 1' && currentRoom.value.players[0]?.name===localPlayer.value.name)
+              || (winner==='Joueur 2' && currentRoom.value.players[1]?.name===localPlayer.value.name);
+    if (!isSpectator.value) recordResult(iWon, 'Neon Pong', `${pongScore.value.p1}-${pongScore.value.p2}`);
+    if (socket) socket.emit('game-action', { roomCode:currentRoom.value.code, game:'pong', action:'pong-win', winner });
     triggerPongWin(winner);
   } else {
-    pBall = {
-      x: 400, y: 225, r: 10,
-      dx: (4 + Math.random()) * dir,
-      dy: (3 + Math.random() * 2) * (Math.random() > 0.5 ? 1 : -1),
-    };
-    nextTick(() => initNeonPong());
+    pBall = { x:400, y:225, r:10, dx:(4+Math.random())*dir, dy:(3+Math.random()*2)*(Math.random()>0.5?1:-1) };
+    nextTick(()=>initNeonPong());
   }
 };
 
-const triggerPongWin = (winner, isFromOpponent = false) => {
-  cancelAnimationFrame(pongAnimId); pongAnimId = null;
+const triggerPongWin = (winner, isFromOpponent=false) => {
+  cancelAnimationFrame(pongAnimId); pongAnimId=null;
+  updateLeaderboard();
   Swal.fire({
-    icon: 'success', title: `🏆 ${winner} gagne !`,
-    html: `Score final : <b>${pongScore.value.p1}</b> – <b>${pongScore.value.p2}</b>`,
-    background: '#0f172a', color: '#f9fafb', confirmButtonColor: '#6366f1',
+    icon:'success', title:`🏆 ${winner} gagne !`,
+    html:`Score final : <b>${pongScore.value.p1}</b> – <b>${pongScore.value.p2}</b>`,
+    background:'#0f172a', color:'#f9fafb', confirmButtonColor:'#6366f1',
     confirmButtonText: isSpectator.value ? 'Retour' : 'Rejouer',
-  }).then(() => {
+  }).then(()=>{
     if (!isSpectator.value) {
-      if (!isFromOpponent && socket) socket.emit('game-action', { roomCode: currentRoom.value.code, game: 'pong', action: 'pong-reset' });
-      pongScore.value = { p1: 0, p2: 0 };
-      nextTick(() => initNeonPong());
-    } else {
-      currentStep.value = 'lobby';
-    }
+      if (!isFromOpponent && socket) socket.emit('game-action',{roomCode:currentRoom.value.code,game:'pong',action:'pong-reset'});
+      pongScore.value={p1:0,p2:0};
+      nextTick(()=>initNeonPong());
+    } else { currentStep.value='lobby'; }
   });
 };
 
 // -------------------------------------------------------
-// SNAKE (Solo)
+// SNAKE
 // -------------------------------------------------------
 const snakeCanvasRef = ref(null);
 const snakeScore     = ref(0);
 const snakeBest      = ref(0);
 const snakeRunning   = ref(false);
-const CELL = 20, COLS = 30, ROWS = 22;
+const CELL=20, COLS=30, ROWS=22;
 
 const initSnake = () => {
   const canvas = snakeCanvasRef.value;
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
-  canvas.width  = COLS * CELL;
-  canvas.height = ROWS * CELL;
-  snakeScore.value = 0; snakeRunning.value = true;
-
-  let snake = [{ x: 15, y: 11 }, { x: 14, y: 11 }, { x: 13, y: 11 }];
-  let dir = { x: 1, y: 0 }, next = { x: 1, y: 0 };
-  let food = randomFood(snake), alive = true;
-
-  const onKey = (e) => {
-    if (['INPUT', 'TEXTAREA'].includes(e.target?.tagName)) return;
-    if (isSpectator.value) return;
-    const map = {
-      ArrowUp: { x: 0, y: -1 }, ArrowDown:  { x: 0, y:  1 },
-      ArrowLeft: { x: -1, y: 0 }, ArrowRight: { x: 1, y:  0 },
-      w: { x: 0, y: -1 }, s: { x: 0, y: 1 }, a: { x: -1, y: 0 }, d: { x: 1, y: 0 },
-    };
-    if (map[e.key] && !(map[e.key].x === -dir.x && map[e.key].y === -dir.y)) next = map[e.key];
-    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) e.preventDefault();
+  canvas.width=COLS*CELL; canvas.height=ROWS*CELL;
+  snakeScore.value=0; snakeRunning.value=true;
+  let snake=[{x:15,y:11},{x:14,y:11},{x:13,y:11}];
+  let dir={x:1,y:0}, next={x:1,y:0};
+  let food=randomFood(snake), alive=true;
+  const onKey=(e)=>{
+    if (['INPUT','TEXTAREA'].includes(e.target?.tagName)) return;
+    const map={ArrowUp:{x:0,y:-1},ArrowDown:{x:0,y:1},ArrowLeft:{x:-1,y:0},ArrowRight:{x:1,y:0},w:{x:0,y:-1},s:{x:0,y:1},a:{x:-1,y:0},d:{x:1,y:0}};
+    if (map[e.key] && !(map[e.key].x===-dir.x && map[e.key].y===-dir.y)) next=map[e.key];
+    if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
   };
-  window.addEventListener('keydown', onKey);
-
-  const tick = () => {
+  window.addEventListener('keydown',onKey);
+  const tick=()=>{
     if (!alive) return;
-    dir = next;
-    const head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
-    if (head.x < 0 || head.x >= COLS || head.y < 0 || head.y >= ROWS) { gameOver(); return; }
-    if (snake.some(s => s.x === head.x && s.y === head.y))              { gameOver(); return; }
+    dir=next;
+    const head={x:snake[0].x+dir.x,y:snake[0].y+dir.y};
+    if (head.x<0||head.x>=COLS||head.y<0||head.y>=ROWS){gameOver();return;}
+    if (snake.some(s=>s.x===head.x&&s.y===head.y)){gameOver();return;}
     snake.unshift(head);
-    if (head.x === food.x && head.y === food.y) {
+    if (head.x===food.x&&head.y===food.y){
       snakeScore.value++;
-      if (snakeScore.value > snakeBest.value) snakeBest.value = snakeScore.value;
-      food = randomFood(snake);
+      if (snakeScore.value>snakeBest.value) snakeBest.value=snakeScore.value;
+      food=randomFood(snake);
     } else { snake.pop(); }
     render();
   };
-
-  const render = () => {
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    ctx.strokeStyle = '#1e293b'; ctx.lineWidth = 0.5;
-    for (let x = 0; x <= COLS; x++) { ctx.beginPath(); ctx.moveTo(x*CELL, 0); ctx.lineTo(x*CELL, canvas.height); ctx.stroke(); }
-    for (let y = 0; y <= ROWS; y++) { ctx.beginPath(); ctx.moveTo(0, y*CELL); ctx.lineTo(canvas.width, y*CELL); ctx.stroke(); }
-    snake.forEach((seg, i) => {
-      const ratio = i / snake.length;
-      ctx.shadowBlur = i === 0 ? 16 : 0; ctx.shadowColor = '#4ade80';
-      ctx.fillStyle  = i === 0 ? '#86efac' : `hsl(${145 - ratio*30}, 70%, ${55 - ratio*20}%)`;
-      ctx.beginPath(); ctx.roundRect(seg.x*CELL+2, seg.y*CELL+2, CELL-4, CELL-4, i===0?6:3); ctx.fill();
+  const render=()=>{
+    ctx.fillStyle='#0f172a'; ctx.fillRect(0,0,canvas.width,canvas.height);
+    ctx.strokeStyle='#1e293b'; ctx.lineWidth=0.5;
+    for(let x=0;x<=COLS;x++){ctx.beginPath();ctx.moveTo(x*CELL,0);ctx.lineTo(x*CELL,canvas.height);ctx.stroke();}
+    for(let y=0;y<=ROWS;y++){ctx.beginPath();ctx.moveTo(0,y*CELL);ctx.lineTo(canvas.width,y*CELL);ctx.stroke();}
+    snake.forEach((seg,i)=>{
+      const ratio=i/snake.length;
+      ctx.shadowBlur=i===0?16:0; ctx.shadowColor='#4ade80';
+      ctx.fillStyle=i===0?'#86efac':`hsl(${145-ratio*30},70%,${55-ratio*20}%)`;
+      ctx.beginPath(); ctx.roundRect(seg.x*CELL+2,seg.y*CELL+2,CELL-4,CELL-4,i===0?6:3); ctx.fill();
     });
-    ctx.shadowBlur = 0;
-    ctx.shadowBlur = 14; ctx.shadowColor = '#f87171'; ctx.fillStyle = '#fca5a5';
-    ctx.beginPath(); ctx.arc(food.x*CELL+CELL/2, food.y*CELL+CELL/2, CELL/2-3, 0, Math.PI*2); ctx.fill();
-    ctx.shadowBlur = 0;
+    ctx.shadowBlur=0;
+    ctx.shadowBlur=14; ctx.shadowColor='#f87171'; ctx.fillStyle='#fca5a5';
+    ctx.beginPath(); ctx.arc(food.x*CELL+CELL/2,food.y*CELL+CELL/2,CELL/2-3,0,Math.PI*2); ctx.fill();
+    ctx.shadowBlur=0;
   };
-
-  const gameOver = () => {
-    alive = false; snakeRunning.value = false;
-    clearInterval(snakeInterval); window.removeEventListener('keydown', onKey);
+  const gameOver=()=>{
+    alive=false; snakeRunning.value=false;
+    clearInterval(snakeInterval); window.removeEventListener('keydown',onKey);
+    recordResult(false,'Cyber Snake',`Score ${snakeScore.value}`);
+    updateLeaderboard();
     Swal.fire({
-      icon: 'error', title: '💀 Game Over !',
-      html: `Score : <b>${snakeScore.value}</b>&nbsp;&nbsp;|&nbsp;&nbsp;Meilleur : <b>${snakeBest.value}</b>`,
-      background: '#0f172a', color: '#f9fafb', confirmButtonColor: '#22c55e',
-      confirmButtonText: isSpectator.value ? 'Retour' : 'Rejouer',
-      showCancelButton: !isSpectator.value, cancelButtonText: 'Quitter',
-    }).then((res) => {
-      if (!isSpectator.value && res.isConfirmed) nextTick(() => initSnake());
-      else currentStep.value = 'lobby';
+      icon:'error', title:'💀 Game Over !',
+      html:`Score : <b>${snakeScore.value}</b>&nbsp;&nbsp;|&nbsp;&nbsp;Meilleur : <b>${snakeBest.value}</b>`,
+      background:'#0f172a', color:'#f9fafb', confirmButtonColor:'#22c55e',
+      confirmButtonText:'Rejouer', showCancelButton:true, cancelButtonText:'Quitter',
+    }).then((res)=>{
+      if (res.isConfirmed) nextTick(()=>initSnake());
+      else currentStep.value='lobby';
     });
   };
-
   render();
   if (snakeInterval) clearInterval(snakeInterval);
-  snakeInterval = setInterval(tick, 120);
-  window.__snakeCleanup = () => window.removeEventListener('keydown', onKey);
+  snakeInterval=setInterval(tick,120);
+  window.__snakeCleanup=()=>window.removeEventListener('keydown',onKey);
 };
 
-const randomFood = (snake) => {
+const randomFood=(snake)=>{
   let pos;
-  do { pos = { x: Math.floor(Math.random()*COLS), y: Math.floor(Math.random()*ROWS) }; }
-  while (snake.some(s => s.x === pos.x && s.y === pos.y));
+  do { pos={x:Math.floor(Math.random()*COLS),y:Math.floor(Math.random()*ROWS)}; }
+  while(snake.some(s=>s.x===pos.x&&s.y===pos.y));
   return pos;
-};
-
-const changeSnakeDir = (dx, dy) => {
-  if (isSpectator.value) return;
-  const map = [['ArrowUp',0,-1],['ArrowDown',0,1],['ArrowLeft',-1,0],['ArrowRight',1,0]];
-  const entry = map.find(([,x,y]) => x===dx && y===dy);
-  if (entry) window.dispatchEvent(new KeyboardEvent('keydown', { key: entry[0] }));
 };
 
 // -------------------------------------------------------
 // TIC-TAC-TOE
 // -------------------------------------------------------
-const xoBoard         = ref(Array(9).fill(null));
-const xoCurrentPlayer = ref('X');
-const xoWinner        = ref(null);
-const xoDraw          = ref(false);
-const xoScore         = ref({ X: 0, O: 0 });
-const WINS = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
+const xoBoard=ref(Array(9).fill(null));
+const xoCurrentPlayer=ref('X');
+const xoWinner=ref(null);
+const xoDraw=ref(false);
+const xoScore=ref({X:0,O:0});
+const WINS=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
 
-const xoPlay = (idx, isFromOpponent = false) => {
-  if (xoBoard.value[idx] || xoWinner.value || xoDraw.value) return;
-  if (!isFromOpponent) {
-    if (currentRoom.value.players[0].name  === 'Toi' && xoCurrentPlayer.value !== 'X') return;
-    if (currentRoom.value.players[1]?.name === 'Toi' && xoCurrentPlayer.value !== 'O') return;
+const xoPlay=(idx,isFromOpponent=false)=>{
+  if (xoBoard.value[idx]||xoWinner.value||xoDraw.value) return;
+  if (!isFromOpponent){
+    if (currentRoom.value.players[0]?.name===localPlayer.value.name && xoCurrentPlayer.value!=='X') return;
+    if (currentRoom.value.players[1]?.name===localPlayer.value.name && xoCurrentPlayer.value!=='O') return;
   }
-  guardSpectator(() => {
-    xoBoard.value[idx] = xoCurrentPlayer.value;
+  guardSpectator(()=>{
+    xoBoard.value[idx]=xoCurrentPlayer.value;
     if (!isFromOpponent && socket)
-      socket.emit('game-action', { roomCode: currentRoom.value.code, game: 'xo', action: 'play', idx });
-
-    const win = WINS.find(([a,b,c]) => xoBoard.value[a] && xoBoard.value[a]===xoBoard.value[b] && xoBoard.value[a]===xoBoard.value[c]);
-    if (win) {
-      xoWinner.value = xoCurrentPlayer.value;
+      socket.emit('game-action',{roomCode:currentRoom.value.code,game:'xo',action:'play',idx});
+    const win=WINS.find(([a,b,c])=>xoBoard.value[a]&&xoBoard.value[a]===xoBoard.value[b]&&xoBoard.value[a]===xoBoard.value[c]);
+    if (win){
+      xoWinner.value=xoCurrentPlayer.value;
       xoScore.value[xoCurrentPlayer.value]++;
-      if (!isFromOpponent)
-        Swal.fire({ icon: 'success', title: `🏆 Joueur ${xoWinner.value} gagne !`, background: '#111827', color: '#f9fafb', confirmButtonColor: '#6366f1', confirmButtonText: 'Rejouer' }).then(() => xoReset());
+      const iWon = (xoCurrentPlayer.value==='X'&&currentRoom.value.players[0]?.name===localPlayer.value.name)
+                || (xoCurrentPlayer.value==='O'&&currentRoom.value.players[1]?.name===localPlayer.value.name);
+      if (!isFromOpponent){
+        recordResult(iWon,'Tic-Tac-Toe',`Joueur ${xoCurrentPlayer.value} gagne`);
+        updateLeaderboard();
+        Swal.fire({icon:'success',title:`🏆 Joueur ${xoWinner.value} gagne !`,background:'#111827',color:'#f9fafb',confirmButtonColor:'#6366f1',confirmButtonText:'Rejouer'}).then(()=>xoReset());
+      }
       return;
     }
-    if (xoBoard.value.every(c => c !== null)) {
-      xoDraw.value = true;
+    if (xoBoard.value.every(c=>c!==null)){
+      xoDraw.value=true;
       if (!isFromOpponent)
-        Swal.fire({ icon: 'info', title: '🤝 Match nul !', background: '#111827', color: '#f9fafb', confirmButtonColor: '#6366f1', confirmButtonText: 'Rejouer' }).then(() => xoReset());
+        Swal.fire({icon:'info',title:'🤝 Match nul !',background:'#111827',color:'#f9fafb',confirmButtonColor:'#6366f1',confirmButtonText:'Rejouer'}).then(()=>xoReset());
       return;
     }
-    xoCurrentPlayer.value = xoCurrentPlayer.value === 'X' ? 'O' : 'X';
+    xoCurrentPlayer.value=xoCurrentPlayer.value==='X'?'O':'X';
   });
 };
 
-const xoReset = (isFromOpponent = false) => {
-  xoBoard.value = Array(9).fill(null);
-  xoCurrentPlayer.value = 'X'; xoWinner.value = null; xoDraw.value = false;
+const xoReset=(isFromOpponent=false)=>{
+  xoBoard.value=Array(9).fill(null);
+  xoCurrentPlayer.value='X'; xoWinner.value=null; xoDraw.value=false;
   if (!isFromOpponent && socket)
-    socket.emit('game-action', { roomCode: currentRoom.value.code, game: 'xo', action: 'reset' });
+    socket.emit('game-action',{roomCode:currentRoom.value.code,game:'xo',action:'reset'});
 };
 
-const xoWinCells = () => {
-  const win = WINS.find(([a,b,c]) => xoBoard.value[a] && xoBoard.value[a]===xoBoard.value[b] && xoBoard.value[a]===xoBoard.value[c]);
-  return win || [];
+const xoWinCells=()=>{
+  const win=WINS.find(([a,b,c])=>xoBoard.value[a]&&xoBoard.value[a]===xoBoard.value[b]&&xoBoard.value[a]===xoBoard.value[c]);
+  return win||[];
 };
+
+// -------------------------------------------------------
+// STATS PANEL
+// -------------------------------------------------------
+const showStats = ref(false);
+const winRate = computed(()=>{
+  const total = localPlayer.value.wins + localPlayer.value.losses;
+  if (total===0) return 0;
+  return Math.round((localPlayer.value.wins/total)*100);
+});
 </script>
 
 <template>
-  <!-- Layout global : sidebar + contenu -->
-  <div class="flex h-screen bg-gray-950 text-white overflow-hidden font-sans">
+  <!-- ══ Setup profil ══ -->
+  <Transition name="fade">
+  <div v-if="showProfileSetup" class="fixed inset-0 z-50 flex items-center justify-center bg-gray-950/95 backdrop-blur-md">
+    <div class="w-full max-w-md p-8 bg-gray-900 rounded-3xl border border-gray-700 shadow-2xl">
+      <h2 class="text-3xl font-black text-center mb-2 bg-gradient-to-r from-indigo-400 to-pink-400 bg-clip-text text-transparent">Bienvenue sur ArenaLink</h2>
+      <p class="text-gray-400 text-center text-sm mb-8">Crée ton profil pour commencer</p>
 
-    <!-- ══════════════════════════════════════════
-         SIDEBAR — CHANNELS + CHAT INTÉGRÉ
-    ══════════════════════════════════════════ -->
-    <aside
-      class="sidebar flex flex-col bg-gray-900 border-r border-gray-800 transition-all duration-300 shrink-0"
-      :class="sidebarOpen ? 'w-64' : 'w-14'"
-    >
+      <!-- Avatar preview -->
+      <div class="flex flex-col items-center gap-4 mb-6">
+        <div class="relative">
+          <img :src="avatarUrl" class="w-24 h-24 rounded-full ring-4 ring-indigo-500/50 bg-gray-800" />
+          <button @click="avatarSeed = Math.random().toString(36).substring(2,8)"
+            class="absolute -bottom-1 -right-1 w-7 h-7 bg-indigo-600 rounded-full flex items-center justify-center text-xs hover:bg-indigo-500 transition">🎲</button>
+        </div>
+        <div class="flex gap-2 flex-wrap justify-center">
+          <button v-for="style in AVATAR_STYLES" :key="style"
+            @click="selectedAvatarStyle = style"
+            :class="['px-2 py-1 rounded-lg text-xs font-mono transition', selectedAvatarStyle===style ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-400 hover:bg-gray-700']">
+            {{ style }}
+          </button>
+        </div>
+      </div>
+
+      <input v-model="pseudoInput" @keyup.enter="saveProfile"
+        placeholder="Ton pseudo (ex: ShadowPing)"
+        maxlength="20"
+        class="w-full bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-center text-white font-bold tracking-wide focus:outline-none focus:border-indigo-500 transition mb-4" />
+
+      <button @click="saveProfile"
+        :disabled="!pseudoInput.trim()"
+        class="w-full py-3 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 disabled:opacity-40 disabled:cursor-not-allowed rounded-xl font-bold text-white transition-all">
+        Entrer dans l'arène 🚀
+      </button>
+    </div>
+  </div>
+  </Transition>
+
+  <!-- ══ Notifications flottantes ══ -->
+  <div class="fixed top-4 right-4 z-40 flex flex-col gap-2 pointer-events-none" style="max-width:300px;">
+    <Transition name="notif" v-for="n in notifications" :key="n.id">
+      <div class="flex items-center gap-2 px-4 py-2.5 bg-gray-800/95 border border-gray-700 rounded-xl shadow-xl text-sm text-white backdrop-blur-sm pointer-events-auto">
+        <span>{{ notifIcon(n.type) }}</span>
+        <span class="flex-1">{{ n.msg }}</span>
+      </div>
+    </Transition>
+  </div>
+
+  <!-- ══ Layout global ══ -->
+  <div class="flex h-screen bg-gray-950 text-white overflow-hidden" style="font-family: 'Segoe UI', system-ui, sans-serif;">
+
+    <!-- ══ SIDEBAR ══ -->
+    <aside class="flex flex-col bg-gray-900 border-r border-gray-800 transition-all duration-300 shrink-0"
+      :class="sidebarOpen ? 'w-64' : 'w-14'">
+
       <!-- Logo / toggle -->
       <div class="flex items-center gap-3 px-3 py-4 border-b border-gray-800">
-        <button
-          @click="sidebarOpen = !sidebarOpen"
-          class="w-8 h-8 flex items-center justify-center rounded-lg bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 transition-colors shrink-0"
-          title="Réduire/Agrandir"
-        >
+        <button @click="sidebarOpen = !sidebarOpen"
+          class="w-8 h-8 flex items-center justify-center rounded-lg bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 transition-colors shrink-0">
           <span class="text-lg">{{ sidebarOpen ? '◀' : '▶' }}</span>
         </button>
         <span v-if="sidebarOpen" class="font-black text-indigo-400 tracking-widest text-sm uppercase truncate">ArenaLink</span>
       </div>
 
-      <!-- Channels -->
-      <nav class="flex-1 overflow-y-auto py-3 px-2 space-y-1">
-        <p v-if="sidebarOpen" class="px-2 mb-2 text-[10px] font-bold text-gray-500 uppercase tracking-widest">Channels</p>
+      <!-- Tabs -->
+      <div v-if="sidebarOpen" class="flex border-b border-gray-800">
+        <button v-for="tab in [{id:'channels',icon:'💬'},{id:'profile',icon:'👤'},{id:'leaderboard',icon:'🏆'}]" :key="tab.id"
+          @click="activeSideTab = tab.id"
+          :class="['flex-1 py-2 text-xs font-semibold transition', activeSideTab===tab.id ? 'text-indigo-400 border-b-2 border-indigo-500' : 'text-gray-500 hover:text-gray-300']">
+          {{ tab.icon }}
+        </button>
+      </div>
 
-        <button
-          v-for="ch in channels" :key="ch.id"
-          @click="activeChannel = ch.id"
-          :title="!sidebarOpen ? ch.label : ''"
-          :class="[
-            'w-full flex items-center gap-3 px-2 py-2.5 rounded-lg text-sm font-medium transition-all',
-            activeChannel === ch.id
-              ? 'bg-indigo-600/25 text-indigo-300 ring-1 ring-indigo-500/40'
-              : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200',
-          ]"
-        >
+      <!-- TAB: Channels -->
+      <nav v-if="activeSideTab==='channels' || !sidebarOpen" class="flex-1 overflow-y-auto py-3 px-2 space-y-1">
+        <p v-if="sidebarOpen" class="px-2 mb-2 text-[10px] font-bold text-gray-500 uppercase tracking-widest">Channels</p>
+        <button v-for="ch in channels" :key="ch.id"
+          @click="activeChannel = ch.id; activeSideTab='channels'"
+          :class="['w-full flex items-center gap-3 px-2 py-2.5 rounded-lg text-sm font-medium transition-all',
+            activeChannel===ch.id && activeSideTab==='channels' ? 'bg-indigo-600/25 text-indigo-300 ring-1 ring-indigo-500/40' : 'text-gray-400 hover:bg-gray-800 hover:text-gray-200']">
           <span class="text-lg shrink-0">{{ ch.icon }}</span>
           <span v-if="sidebarOpen" class="truncate"># {{ ch.label }}</span>
         </button>
       </nav>
 
-      <!-- Statut de la salle -->
+      <!-- TAB: Profil -->
+      <div v-if="activeSideTab==='profile' && sidebarOpen" class="flex-1 overflow-y-auto p-4 space-y-4">
+        <div class="flex items-center gap-3">
+          <img :src="localPlayer.avatar" class="w-12 h-12 rounded-full ring-2 ring-indigo-500/50 bg-gray-800" />
+          <div class="flex-1 min-w-0">
+            <p class="font-bold text-white truncate">{{ localPlayer.name }}</p>
+            <p :class="['text-xs font-semibold', eloRank(localPlayer.elo).color]">{{ eloRank(localPlayer.elo).label }}</p>
+          </div>
+          <button @click="showStats = !showStats" class="text-gray-400 hover:text-white text-xs">📊</button>
+        </div>
+
+        <!-- ELO bar -->
+        <div>
+          <div class="flex justify-between text-xs text-gray-400 mb-1">
+            <span>ELO</span><span class="font-mono font-bold text-indigo-400">{{ localPlayer.elo }}</span>
+          </div>
+          <div class="h-2 bg-gray-800 rounded-full overflow-hidden">
+            <div class="h-full bg-gradient-to-r from-indigo-500 to-purple-500 rounded-full transition-all duration-500"
+              :style="`width:${Math.min(100, ((localPlayer.elo-800)/800)*100)}%`"></div>
+          </div>
+        </div>
+
+        <!-- W/L -->
+        <div class="grid grid-cols-3 gap-2 text-center">
+          <div class="bg-green-500/10 border border-green-500/30 rounded-xl p-2">
+            <p class="text-xl font-black text-green-400">{{ localPlayer.wins }}</p>
+            <p class="text-[10px] text-gray-400">Victoires</p>
+          </div>
+          <div class="bg-gray-800 border border-gray-700 rounded-xl p-2">
+            <p class="text-xl font-black text-indigo-400">{{ winRate }}%</p>
+            <p class="text-[10px] text-gray-400">Win rate</p>
+          </div>
+          <div class="bg-red-500/10 border border-red-500/30 rounded-xl p-2">
+            <p class="text-xl font-black text-red-400">{{ localPlayer.losses }}</p>
+            <p class="text-[10px] text-gray-400">Défaites</p>
+          </div>
+        </div>
+
+        <!-- Historique -->
+        <div>
+          <p class="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Historique récent</p>
+          <div class="space-y-1.5 max-h-48 overflow-y-auto scrollbar-thin">
+            <div v-if="localPlayer.history.length===0" class="text-xs text-gray-600 text-center py-4">Aucune partie jouée</div>
+            <div v-for="(h,i) in localPlayer.history" :key="i"
+              class="flex items-center gap-2 px-2 py-1.5 rounded-lg bg-gray-800/60 text-xs">
+              <span :class="h.result==='Victoire' ? 'text-green-400' : 'text-red-400'">{{ h.result==='Victoire' ? '✅' : '❌' }}</span>
+              <span class="flex-1 truncate text-gray-300">{{ h.game }}</span>
+              <span :class="['font-mono font-bold', h.eloDiff>=0 ? 'text-green-400' : 'text-red-400']">
+                {{ h.eloDiff>=0 ? '+' : '' }}{{ h.eloDiff }}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <button @click="showProfileSetup=true; pseudoInput=localPlayer.name"
+          class="w-full py-2 bg-gray-800 hover:bg-gray-700 rounded-xl text-xs text-gray-400 transition">
+          ✏️ Modifier le profil
+        </button>
+      </div>
+
+      <!-- TAB: Leaderboard global -->
+      <div v-if="activeSideTab==='leaderboard' && sidebarOpen" class="flex-1 overflow-y-auto p-3">
+        <div class="flex items-center justify-between mb-3">
+          <p class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Classement global</p>
+          <button @click="updateLeaderboard(); socket && socket.emit('get-leaderboard')"
+            class="text-gray-500 hover:text-gray-300 text-xs">🔄</button>
+        </div>
+        <div class="space-y-2">
+          <div v-if="globalLeaderboard.length===0" class="text-xs text-gray-600 text-center py-6">
+            Aucun joueur classé.<br>Joue une partie !
+          </div>
+          <div v-for="(p,i) in globalLeaderboard.slice(0,10)" :key="p.name"
+            :class="['flex items-center gap-2 px-2 py-2 rounded-xl text-xs transition',
+              p.name===localPlayer.name ? 'bg-indigo-600/20 border border-indigo-500/40' : 'bg-gray-800/60']">
+            <span class="w-5 text-center font-black"
+              :class="i===0?'text-yellow-400':i===1?'text-gray-300':i===2?'text-orange-400':'text-gray-500'">
+              {{ i===0?'🥇':i===1?'🥈':i===2?'🥉':i+1 }}
+            </span>
+            <img :src="p.avatar" class="w-6 h-6 rounded-full bg-gray-700" />
+            <span class="flex-1 truncate font-semibold text-gray-200">{{ p.name }}</span>
+            <span class="font-mono font-bold text-indigo-400">{{ p.elo }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Statut salle -->
       <div v-if="sidebarOpen" class="px-3 py-3 border-t border-gray-800">
         <div v-if="currentRoom.code" class="flex items-center gap-2 text-xs text-green-400">
           <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
@@ -677,133 +1021,144 @@ const xoWinCells = () => {
         </div>
       </div>
 
-      <!-- ── Chat du channel actif intégré dans la sidebar ── -->
-      <div v-if="sidebarOpen" class="flex flex-col border-t border-gray-800" style="height: 260px;">
-        <!-- En-tête channel -->
+      <!-- Chat channel intégré -->
+      <div v-if="sidebarOpen && activeSideTab==='channels'" class="flex flex-col border-t border-gray-800" style="height:240px;">
         <div class="px-4 py-2 flex items-center gap-2 text-xs font-semibold text-gray-400 border-b border-gray-800/60">
-          <span>{{ channels.find(c => c.id === activeChannel)?.icon }}</span>
-          <span># {{ channels.find(c => c.id === activeChannel)?.label }}</span>
+          <span>{{ channels.find(c=>c.id===activeChannel)?.icon }}</span>
+          <span># {{ channels.find(c=>c.id===activeChannel)?.label }}</span>
         </div>
-
-        <!-- Messages -->
-        <div
-          :id="`ch-box-${activeChannel}`"
-          class="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-thin"
-        >
-          <div v-if="channelMessages[activeChannel].length === 0"
-            class="text-center text-gray-600 text-xs mt-4">
-            Aucun message.<br>Sois le premier !
+        <div :id="`ch-box-${activeChannel}`" class="flex-1 overflow-y-auto p-3 space-y-2 scrollbar-thin">
+          <div v-if="channelMessages[activeChannel].length===0" class="text-center text-gray-600 text-xs mt-4">
+            Aucun message. Sois le premier !
           </div>
-          <div v-for="(msg, i) in channelMessages[activeChannel]" :key="i"
-            class="flex flex-col"
-            :class="msg.self ? 'items-end' : 'items-start'"
-          >
-            <span class="text-[10px] text-gray-500 mb-0.5">{{ msg.sender }} · {{ msg.time }}</span>
-            <div
-              class="px-3 py-1.5 rounded-xl text-xs max-w-[90%] break-words"
-              :class="msg.self
-                ? 'bg-indigo-600 text-white rounded-br-none'
-                : 'bg-gray-800 text-gray-200 rounded-bl-none'"
-            >
+          <div v-for="(msg,i) in channelMessages[activeChannel]" :key="i"
+            class="flex flex-col" :class="msg.self?'items-end':'items-start'">
+            <div class="flex items-center gap-1 mb-0.5">
+              <img v-if="msg.avatar" :src="msg.avatar" class="w-3.5 h-3.5 rounded-full" />
+              <span class="text-[10px] text-gray-500">{{ msg.sender }} · {{ msg.time }}</span>
+            </div>
+            <div class="px-3 py-1.5 rounded-xl text-xs max-w-[90%] break-words"
+              :class="msg.self ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-gray-800 text-gray-200 rounded-bl-none'">
               {{ msg.text }}
             </div>
           </div>
         </div>
-
-        <!-- Saisie -->
         <div class="px-3 py-2 border-t border-gray-800 flex gap-2">
-          <input
-            v-model="channelInput"
-            @keyup.enter="sendChannelMessage"
-            :placeholder="`#${channels.find(c => c.id === activeChannel)?.label}…`"
-            class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-colors"
-          />
-          <button
-            @click="sendChannelMessage"
-            class="px-2 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-bold transition-colors"
-          >↑</button>
+          <input v-model="channelInput" @keyup.enter="sendChannelMessage"
+            :placeholder="`#${channels.find(c=>c.id===activeChannel)?.label}…`"
+            class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-colors" />
+          <button @click="sendChannelMessage"
+            class="px-2 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-xs font-bold transition-colors">↑</button>
         </div>
       </div>
     </aside>
 
-    <!-- ══════════════════════════════════════════
-         ZONE PRINCIPALE (jeu uniquement)
-    ══════════════════════════════════════════ -->
-    <div class="flex-1 flex flex-col overflow-auto">
+    <!-- ══ ZONE PRINCIPALE ══ -->
+    <div class="flex-1 flex flex-col overflow-auto relative">
 
       <!-- Orbes décoratifs -->
-      <div class="pointer-events-none fixed inset-0 overflow-hidden -z-10" aria-hidden="true">
-        <div class="orb orb-1"></div>
-        <div class="orb orb-2"></div>
-        <div class="orb orb-3"></div>
+      <div class="pointer-events-none fixed inset-0 overflow-hidden -z-10">
+        <div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div>
         <div class="grid-bg"></div>
       </div>
 
       <div class="flex-1 flex flex-col items-center justify-center p-6">
 
-        <!-- ── Sélection de jeu ── -->
+        <!-- ══ Sélection ══ -->
         <Transition name="fade">
-        <div v-if="currentStep === 'selection'" class="w-full max-w-4xl">
-          <div class="text-center mb-12">
+        <div v-if="currentStep==='selection'" class="w-full max-w-4xl">
+          <div class="text-center mb-10">
             <div class="inline-flex items-center gap-2 px-3 py-1 bg-indigo-500/10 border border-indigo-500/30 rounded-full text-indigo-400 text-xs font-mono mb-5 tracking-widest uppercase">
               <span class="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse"></span>
               Online Multiplayer
             </div>
-            <h1 class="text-5xl font-black tracking-tight mb-3 title-glow bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent">
+            <h1 class="text-5xl font-black tracking-tight mb-3 bg-gradient-to-r from-indigo-400 via-purple-400 to-pink-400 bg-clip-text text-transparent" style="filter:drop-shadow(0 0 40px rgba(139,92,246,.35))">
               ArenaLink Arcade
             </h1>
-            <p class="text-gray-400 text-lg">Choisis un mini-jeu et défie tes amis</p>
+            <p class="text-gray-400 text-lg">Bonjour <span class="text-indigo-400 font-bold">{{ localPlayer.name }}</span> — Choisis un jeu !</p>
           </div>
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
-            <div
-              v-for="game in games" :key="game.id"
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div v-for="game in games" :key="game.id"
               @click="selectGame(game)"
               class="relative p-[2px] rounded-2xl cursor-pointer group hover:scale-[1.04] transition-all duration-300 shadow-xl"
-              :class="`bg-gradient-to-br ${game.color}`"
-            >
+              :class="`bg-gradient-to-br ${game.color}`">
               <div class="bg-gray-900 rounded-[14px] h-full p-8 flex flex-col items-center text-center gap-4 hover:bg-gray-800/90 transition-colors">
                 <span class="text-7xl drop-shadow-lg">{{ game.icon }}</span>
                 <h3 class="text-xl font-bold text-white">{{ game.name }}</h3>
                 <span class="px-3 py-1 bg-gray-800 rounded-full text-xs text-gray-400 font-mono border border-gray-700">{{ game.desc }}</span>
-                <div class="mt-2 px-5 py-2 rounded-xl font-bold text-sm text-white opacity-0 group-hover:opacity-100 transition-all translate-y-1 group-hover:translate-y-0" :class="`bg-gradient-to-r ${game.color}`">
-                  Jouer →
-                </div>
+                <div class="mt-2 px-5 py-2 rounded-xl font-bold text-sm text-white opacity-0 group-hover:opacity-100 transition-all" :class="`bg-gradient-to-r ${game.color}`">Jouer →</div>
               </div>
             </div>
           </div>
 
-          <div class="mt-8 text-center">
-            <button
-              @click="joinAsSpectator"
-              class="inline-flex items-center gap-2 px-6 py-3 border border-yellow-500/40 bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 rounded-xl font-semibold text-sm transition-all"
-            >
-              👁 Rejoindre une salle en spectateur
+          <!-- Actions rapides -->
+          <div class="flex flex-wrap gap-3 justify-center">
+            <button @click="showPublicRooms=true; refreshPublicRooms()"
+              class="inline-flex items-center gap-2 px-5 py-2.5 border border-indigo-500/40 bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 rounded-xl font-semibold text-sm transition-all">
+              🌍 Salles publiques
+            </button>
+            <button @click="joinAsSpectator"
+              class="inline-flex items-center gap-2 px-5 py-2.5 border border-yellow-500/40 bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 rounded-xl font-semibold text-sm transition-all">
+              👁 Rejoindre en spectateur
             </button>
           </div>
         </div>
         </Transition>
 
-        <!-- ── Rejoindre / créer ── -->
+        <!-- ══ Modal salles publiques ══ -->
         <Transition name="fade">
-        <div v-if="currentStep === 'join'" class="w-full max-w-md">
+        <div v-if="showPublicRooms" class="fixed inset-0 z-30 flex items-center justify-center bg-gray-950/80 backdrop-blur-sm">
+          <div class="w-full max-w-md bg-gray-900 rounded-2xl border border-gray-700 shadow-2xl overflow-hidden">
+            <div class="flex items-center justify-between px-6 py-4 border-b border-gray-800">
+              <h3 class="font-bold text-white">🌍 Salles publiques</h3>
+              <button @click="showPublicRooms=false" class="text-gray-400 hover:text-white">✕</button>
+            </div>
+            <div class="p-4 space-y-3 max-h-80 overflow-y-auto">
+              <div v-if="publicRooms.length===0" class="text-center text-gray-500 text-sm py-8">
+                Aucune salle publique disponible.<br>Crée-en une !
+              </div>
+              <div v-for="room in publicRooms" :key="room.code"
+                class="flex items-center gap-3 p-3 bg-gray-800 hover:bg-gray-700 rounded-xl cursor-pointer transition"
+                @click="joinPublicRoom(room)">
+                <span class="text-2xl">{{ games.find(g=>g.id===room.gameId)?.icon || '🎮' }}</span>
+                <div class="flex-1">
+                  <p class="font-bold text-white text-sm">{{ room.gameName }}</p>
+                  <p class="text-xs text-gray-400 font-mono">{{ room.code }} · {{ room.players }}/2 joueurs</p>
+                </div>
+                <span class="px-3 py-1 bg-indigo-600 text-white text-xs rounded-lg font-bold">Rejoindre</span>
+              </div>
+            </div>
+            <div class="px-6 py-3 border-t border-gray-800">
+              <button @click="refreshPublicRooms" class="text-xs text-gray-400 hover:text-white">🔄 Rafraîchir</button>
+            </div>
+          </div>
+        </div>
+        </Transition>
+
+        <!-- ══ Rejoindre / créer ══ -->
+        <Transition name="fade">
+        <div v-if="currentStep==='join'" class="w-full max-w-md">
           <button @click="goBack" class="text-gray-400 hover:text-white mb-6 flex items-center gap-1 text-sm transition-colors">← Retour aux jeux</button>
           <div class="bg-gray-800/70 backdrop-blur-md p-8 rounded-2xl shadow-2xl border border-gray-700/80 ring-1 ring-white/5">
             <div class="flex items-center justify-center text-6xl mb-4">{{ selectedGame.icon }}</div>
             <h2 class="text-2xl font-bold text-center mb-8">{{ selectedGame.name }}</h2>
-            <div class="space-y-5">
-              <button @click="createRoom"
-                class="w-full py-4 bg-indigo-600 hover:bg-indigo-500 rounded-xl font-bold text-lg transition-all shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2">
-                🏠 Créer une salle (Joueur 1)
+            <div class="space-y-4">
+              <button @click="createRoom(false)"
+                class="w-full py-3.5 bg-indigo-600 hover:bg-indigo-500 rounded-xl font-bold text-lg transition-all shadow-lg shadow-indigo-600/20 flex items-center justify-center gap-2">
+                🏠 Salle privée (Joueur 1)
+              </button>
+              <button @click="createRoom(true)"
+                class="w-full py-3.5 bg-purple-600/80 hover:bg-purple-500 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2">
+                🌍 Salle publique (Joueur 1)
               </button>
               <div class="flex items-center gap-4 text-gray-500 text-sm">
                 <div class="flex-1 h-px bg-gray-700"></div>OU<div class="flex-1 h-px bg-gray-700"></div>
               </div>
               <div class="flex gap-2">
-                <input
-                  v-model="roomCode" @keyup.enter="joinRoom"
+                <input v-model="roomCode" @keyup.enter="joinRoom"
                   placeholder="Code de la salle"
-                  class="flex-1 bg-gray-900 border border-gray-700 rounded-xl px-4 py-3 text-center uppercase tracking-widest font-mono focus:outline-none focus:border-indigo-500 transition-colors"
-                />
+                  class="flex-1 bg-gray-900 border border-gray-700 rounded-xl px-4 py-3 text-center uppercase tracking-widest font-mono focus:outline-none focus:border-indigo-500 transition-colors" />
                 <button @click="joinRoom" class="px-5 bg-gray-700 hover:bg-indigo-600 rounded-xl font-bold transition-all">Rejoindre</button>
               </div>
               <button @click="joinAsSpectator"
@@ -815,53 +1170,69 @@ const xoWinCells = () => {
         </div>
         </Transition>
 
-        <!-- ── Lobby ── -->
+        <!-- ══ Lobby ══ -->
         <Transition name="fade">
-        <div v-if="currentStep === 'lobby'" class="w-full max-w-3xl flex flex-col gap-6">
+        <div v-if="currentStep==='lobby'" class="w-full max-w-3xl flex flex-col gap-5">
 
-          <div v-if="isSpectator" class="flex items-center gap-3 p-4 bg-yellow-500/10 border-2 border-yellow-500/50 rounded-2xl text-yellow-300 animate-pulse">
+          <div v-if="isSpectator" class="flex items-center gap-3 p-4 bg-yellow-500/10 border-2 border-yellow-500/50 rounded-2xl text-yellow-300">
             <span class="text-2xl">👁</span>
-            <div>
-              <p class="font-bold">Mode Spectateur actif</p>
-              <p class="text-sm text-yellow-400/80">Tu regarderas la partie sans pouvoir interagir.</p>
-            </div>
+            <div><p class="font-bold">Mode Spectateur actif</p><p class="text-sm text-yellow-400/80">Tu regarderas sans pouvoir interagir.</p></div>
           </div>
 
           <div class="bg-gray-800/70 backdrop-blur-md p-6 rounded-2xl border border-gray-700/80 flex flex-col sm:flex-row justify-between items-center gap-4">
             <div>
               <h2 class="text-2xl font-bold flex items-center gap-2">{{ selectedGame.icon }} {{ selectedGame.name }}</h2>
-              <p class="text-gray-400 text-sm mt-1">Salle d'attente</p>
+              <div class="flex items-center gap-2 mt-1">
+                <span class="text-gray-400 text-sm">Salle d'attente</span>
+                <span v-if="currentRoom.isPublic" class="px-2 py-0.5 bg-purple-600/30 text-purple-400 rounded-full text-xs font-bold border border-purple-500/40">🌍 Publique</span>
+              </div>
             </div>
-            <div class="bg-gray-900 px-5 py-2.5 rounded-xl border border-gray-700 flex items-center gap-4">
-              <span class="text-2xl font-mono text-indigo-400 tracking-widest font-bold">{{ currentRoom.code }}</span>
-              <button @click="copyCode" class="p-2 bg-gray-800 hover:bg-indigo-600 rounded-lg transition-colors" title="Copier le code">📋</button>
+            <div class="flex items-center gap-2 flex-wrap justify-end">
+              <div class="bg-gray-900 px-5 py-2.5 rounded-xl border border-gray-700 flex items-center gap-3">
+                <span class="text-2xl font-mono text-indigo-400 tracking-widest font-bold">{{ currentRoom.code }}</span>
+                <button @click="copyCode" class="p-1.5 bg-gray-800 hover:bg-indigo-600 rounded-lg transition-colors text-sm" title="Copier le code">📋</button>
+                <button @click="copyInviteLink" class="p-1.5 bg-gray-800 hover:bg-purple-600 rounded-lg transition-colors text-sm" title="Copier le lien d'invitation">🔗</button>
+              </div>
             </div>
           </div>
 
+          <!-- Joueurs -->
           <div class="bg-gray-800/70 backdrop-blur-md p-6 rounded-2xl border border-gray-700/80">
             <h3 class="text-sm font-semibold text-indigo-400 uppercase tracking-wider mb-4">👥 Joueurs</h3>
             <div class="flex gap-4 flex-wrap">
               <div v-for="(player, i) in currentRoom.players" :key="i"
-                class="flex-1 min-w-[160px] bg-gray-900 border border-indigo-500/40 p-4 rounded-xl flex items-center gap-3">
-                <img :src="player.avatar" class="w-12 h-12 rounded-full bg-gray-700 ring-2 ring-indigo-500/50" />
-                <div>
-                  <p class="font-bold text-white text-sm">{{ player.name }}</p>
-                  <p class="text-xs text-indigo-400 mt-0.5">{{ player.role }}</p>
+                class="flex-1 min-w-[180px] bg-gray-900 border border-indigo-500/40 p-4 rounded-xl">
+                <div class="flex items-center gap-3 mb-2">
+                  <img :src="player.avatar" class="w-12 h-12 rounded-full bg-gray-700 ring-2 ring-indigo-500/50" />
+                  <div>
+                    <p class="font-bold text-white text-sm">{{ player.name }}</p>
+                    <p class="text-xs text-indigo-400">{{ player.role }}</p>
+                  </div>
                 </div>
+                <div class="flex items-center justify-between">
+                  <span :class="['text-xs font-bold', eloRank(player.elo||1000).color]">{{ eloRank(player.elo||1000).label }}</span>
+                  <span class="font-mono text-xs text-gray-400">{{ player.elo || 1000 }} ELO</span>
+                </div>
+                <!-- Bouton invitation socket -->
+                <button v-if="i===1 && !isSpectator && player.name!==localPlayer.name"
+                  @click="sendSocketInvite(player.name)"
+                  class="mt-2 w-full py-1 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 rounded-lg text-xs font-semibold transition">
+                  📨 Inviter
+                </button>
               </div>
               <div v-if="currentRoom.players.length < 2"
-                class="flex-1 min-w-[160px] bg-gray-900/50 border border-dashed border-gray-600 p-4 rounded-xl flex items-center justify-center text-gray-500 text-sm gap-2">
+                class="flex-1 min-w-[180px] bg-gray-900/50 border border-dashed border-gray-600 p-4 rounded-xl flex items-center justify-center text-gray-500 text-sm gap-2">
                 <span class="animate-pulse">⏳</span> En attente du Joueur 2…
               </div>
             </div>
 
+            <!-- Spectateurs -->
             <div v-if="currentRoom.spectators.length > 0" class="mt-4">
               <h3 class="text-sm font-semibold text-yellow-400 uppercase tracking-wider mb-2">👁 Spectateurs ({{ currentRoom.spectators.length }})</h3>
               <div class="flex gap-2 flex-wrap">
                 <div v-for="(spec, i) in currentRoom.spectators" :key="i"
                   class="flex items-center gap-2 bg-yellow-500/10 border border-yellow-500/30 px-3 py-1.5 rounded-full text-xs text-yellow-300">
-                  <img :src="spec.avatar" class="w-5 h-5 rounded-full" />
-                  {{ spec.name }}
+                  <img :src="spec.avatar" class="w-5 h-5 rounded-full" />{{ spec.name }}
                 </div>
               </div>
             </div>
@@ -877,20 +1248,27 @@ const xoWinCells = () => {
         </div>
         </Transition>
 
-        <!-- ── Jeu en cours ── -->
+        <!-- ══ Jeu en cours ══ -->
         <Transition name="fade">
-        <div v-if="currentStep === 'playing'" class="w-full flex flex-col items-center gap-4">
+        <div v-if="currentStep==='playing'" class="w-full flex flex-col items-center gap-4 relative">
+
+          <!-- Emojis flottants -->
+          <div class="pointer-events-none fixed inset-0 z-20 overflow-hidden">
+            <Transition name="float" v-for="e in floatingEmojis" :key="e.id">
+              <span class="absolute text-3xl float-emoji" :style="`left:${e.x}%; bottom: 30%;`">{{ e.emoji }}</span>
+            </Transition>
+          </div>
 
           <div v-if="isSpectator"
             class="w-full max-w-4xl flex items-center gap-3 px-4 py-2.5 bg-yellow-500/10 border border-yellow-500/40 rounded-xl text-yellow-300 text-sm font-semibold">
-            <span>👁</span> Mode Spectateur — Toutes les interactions sont désactivées
+            <span>👁</span> Mode Spectateur — Interactions désactivées
           </div>
 
           <!-- PONG -->
-          <template v-if="selectedGame.id === 'pong'">
+          <template v-if="selectedGame.id==='pong'">
             <div class="flex justify-between w-full max-w-4xl px-2 mb-2">
               <div class="flex flex-col items-center">
-                <span class="text-xs text-gray-400 uppercase tracking-wider">{{ currentRoom.players[0]?.name === 'Toi' ? 'Toi (J1)' : isSpectator ? 'Joueur 1' : 'Hôte' }}</span>
+                <span class="text-xs text-gray-400 uppercase">{{ currentRoom.players[0]?.name }}</span>
                 <span class="text-4xl font-black text-indigo-400 font-mono">{{ pongScore.p1 }}</span>
               </div>
               <div class="flex flex-col items-center text-center">
@@ -898,42 +1276,41 @@ const xoWinCells = () => {
                 <span class="text-sm text-gray-500">Premier à {{ MAX_SCORE }} points</span>
               </div>
               <div class="flex flex-col items-center">
-                <span class="text-xs text-gray-400 uppercase tracking-wider">{{ currentRoom.players[1]?.name === 'Toi' ? 'Toi (J2)' : isSpectator ? 'Joueur 2' : 'Invité' }}</span>
+                <span class="text-xs text-gray-400 uppercase">{{ currentRoom.players[1]?.name }}</span>
                 <span class="text-4xl font-black text-rose-400 font-mono">{{ pongScore.p2 }}</span>
               </div>
             </div>
-            <canvas ref="canvasRef"
-              :tabindex="isSpectator ? -1 : 0"
+            <canvas ref="canvasRef" :tabindex="isSpectator?-1:0"
               @click="!isSpectator && $event.target.focus()"
-              class="border-2 border-gray-700 rounded-2xl shadow-2xl outline-none canvas-glow"
-              :class="isSpectator ? 'cursor-default opacity-90' : 'cursor-pointer'"
-              style="max-width:100%;"
-            ></canvas>
+              class="border-2 border-gray-700 rounded-2xl shadow-2xl outline-none"
+              style="max-width:100%; box-shadow:0 0 40px rgba(99,102,241,.15),0 16px 48px rgba(0,0,0,.5);"
+              :class="isSpectator?'cursor-default opacity-90':'cursor-pointer'"></canvas>
           </template>
 
           <!-- SNAKE -->
-          <template v-if="selectedGame.id === 'snake'">
+          <template v-if="selectedGame.id==='snake'">
             <div class="flex justify-between w-full max-w-2xl px-2 mb-2">
               <div class="flex flex-col items-center">
-                <span class="text-xs text-gray-400 uppercase tracking-wider">Score</span>
+                <span class="text-xs text-gray-400 uppercase">Score</span>
                 <span class="text-4xl font-black text-green-400 font-mono">{{ snakeScore }}</span>
               </div>
               <div class="flex flex-col items-center text-center">
-                <span class="text-xs text-gray-400">{{ isSpectator ? '👁 Spectateur' : 'Flèches ou WASD' }}</span>
+                <span class="text-xs text-gray-400">Flèches ou WASD</span>
               </div>
               <div class="flex flex-col items-center">
-                <span class="text-xs text-gray-400 uppercase tracking-wider">Meilleur</span>
+                <span class="text-xs text-gray-400 uppercase">Meilleur</span>
                 <span class="text-4xl font-black text-yellow-400 font-mono">{{ snakeBest }}</span>
               </div>
             </div>
-            <canvas ref="snakeCanvasRef" class="border-2 border-gray-700 rounded-2xl shadow-2xl canvas-glow-green" style="max-width:100%;"></canvas>
+            <canvas ref="snakeCanvasRef" class="border-2 border-gray-700 rounded-2xl shadow-2xl"
+              style="max-width:100%; box-shadow:0 0 40px rgba(34,197,94,.12),0 16px 48px rgba(0,0,0,.5);"></canvas>
           </template>
 
           <!-- TIC-TAC-TOE -->
-          <template v-if="selectedGame.id === 'xo'">
+          <template v-if="selectedGame.id==='xo'">
             <div class="flex gap-12 mb-4">
               <div class="flex flex-col items-center">
-                <span class="text-xs text-gray-400 uppercase tracking-wider">Joueur X</span>
+                <span class="text-xs text-gray-400 uppercase">Joueur X</span>
                 <span class="text-4xl font-black text-pink-400 font-mono">{{ xoScore.X }}</span>
               </div>
               <div class="flex flex-col items-center justify-center">
@@ -942,17 +1319,15 @@ const xoWinCells = () => {
                 </span>
               </div>
               <div class="flex flex-col items-center">
-                <span class="text-xs text-gray-400 uppercase tracking-wider">Joueur O</span>
+                <span class="text-xs text-gray-400 uppercase">Joueur O</span>
                 <span class="text-4xl font-black text-indigo-400 font-mono">{{ xoScore.O }}</span>
               </div>
             </div>
-            <div class="grid grid-cols-3 gap-3" style="width:300px;" :class="isSpectator ? 'pointer-events-none opacity-80' : ''">
+            <div class="grid grid-cols-3 gap-3" style="width:300px;" :class="isSpectator?'pointer-events-none opacity-80':''">
               <button v-for="(cell, i) in xoBoard" :key="i" @click="xoPlay(i)"
-                :class="[
-                  'w-24 h-24 rounded-2xl font-black text-4xl border-2 transition-all duration-200',
-                  xoWinCells().includes(i) ? 'border-yellow-400 bg-yellow-400/10 scale-105 shadow-lg shadow-yellow-400/20' : 'border-gray-700 bg-gray-800/80 hover:bg-gray-700 hover:border-gray-500 hover:scale-105',
-                  cell === 'X' ? 'text-pink-400' : 'text-indigo-400',
-                ]">
+                :class="['w-24 h-24 rounded-2xl font-black text-4xl border-2 transition-all duration-200',
+                  xoWinCells().includes(i)?'border-yellow-400 bg-yellow-400/10 scale-105':'border-gray-700 bg-gray-800/80 hover:bg-gray-700 hover:border-gray-500 hover:scale-105',
+                  cell==='X'?'text-pink-400':'text-indigo-400']">
                 {{ cell || '' }}
               </button>
             </div>
@@ -961,41 +1336,75 @@ const xoWinCells = () => {
             </div>
           </template>
 
+          <!-- UNO -->
+          <template v-if="selectedGame.id === 'uno'">
+            <!-- <div class="w-full"> -->
+              <Uno
+              :room-code="currentRoom.code"
+              :local-player="localPlayer"
+              :is-host="currentRoom.players[0]?.name === localPlayer.name"
+              :is-spectator="isSpectator"
+              :socket="socket"
+              @quit="goBack"
+              @win="onUnoWin"
+              @loss="onUnoLoss"
+              />
+    
+          </template>
+
+          <!-- ── Barre actions en jeu ── -->
+          <div class="w-full max-w-4xl flex items-center gap-3">
+            <!-- Réactions emoji -->
+            <div class="relative">
+              <button @click="showEmojiPicker=!showEmojiPicker"
+                class="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-xl text-sm font-bold transition">
+                😄 Réagir
+              </button>
+              <div v-if="showEmojiPicker"
+                class="absolute bottom-12 left-0 bg-gray-800 border border-gray-700 rounded-2xl p-3 flex gap-2 flex-wrap shadow-2xl z-20" style="width:200px;">
+                <button v-for="emoji in EMOJIS" :key="emoji"
+                  @click="sendReaction(emoji)"
+                  class="text-2xl hover:scale-125 transition-transform">{{ emoji }}</button>
+              </div>
+            </div>
+
+            <div class="flex-1"></div>
+
+            <button @click="quitGame"
+              class="px-5 py-2 bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white rounded-xl font-bold transition-all text-sm">
+              ← {{ isSpectator ? 'Quitter le spectacle' : 'Quitter le match' }}
+            </button>
+          </div>
+
           <!-- Chat en jeu -->
-          <div class="w-full max-w-4xl mt-2 bg-gray-900/80 border border-gray-700/60 rounded-2xl overflow-hidden">
+          <div class="w-full max-w-4xl bg-gray-900/80 border border-gray-700/60 rounded-2xl overflow-hidden">
             <div class="px-4 py-2 border-b border-gray-700/60 flex items-center gap-2 text-xs font-semibold text-gray-400">
               💬 Chat de la salle
               <span v-if="isSpectator" class="ml-auto text-yellow-500/80">👁 spectateur</span>
             </div>
             <div id="arena-chat-box" class="h-28 overflow-y-auto p-3 space-y-1.5 scrollbar-thin">
-              <div v-if="roomMessages.length === 0" class="text-center text-gray-600 text-xs mt-4">Aucun message…</div>
-              <div v-for="(msg, i) in roomMessages" :key="i"
-                class="flex flex-col"
-                :class="msg.self ? 'items-end' : 'items-start'"
-              >
-                <span class="text-[10px] text-gray-500 mb-0.5">{{ msg.sender }} · {{ msg.time }}</span>
+              <div v-if="roomMessages.length===0" class="text-center text-gray-600 text-xs mt-4">Aucun message…</div>
+              <div v-for="(msg,i) in roomMessages" :key="i"
+                class="flex flex-col" :class="msg.self?'items-end':'items-start'">
+                <div class="flex items-center gap-1 mb-0.5">
+                  <img v-if="msg.avatar" :src="msg.avatar" class="w-3.5 h-3.5 rounded-full" />
+                  <span class="text-[10px] text-gray-500">{{ msg.sender }} · {{ msg.time }}</span>
+                </div>
                 <div class="px-3 py-1 rounded-xl text-sm max-w-[80%] break-words"
-                  :class="msg.self ? 'bg-indigo-600 text-white' : 'bg-gray-800 text-gray-200'">
+                  :class="msg.self?'bg-indigo-600 text-white':'bg-gray-800 text-gray-200'">
                   {{ msg.text }}
                 </div>
               </div>
             </div>
             <div class="px-3 py-2 border-t border-gray-700/60 flex gap-2">
-              <input
-                v-model="chatMessage"
-                @keyup.enter="sendRoomMessage"
+              <input v-model="chatMessage" @keyup.enter="sendRoomMessage"
                 placeholder="Écris un message…"
-                class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-colors"
-              />
+                class="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-white placeholder-gray-500 focus:outline-none focus:border-indigo-500 transition-colors" />
               <button @click="sendRoomMessage"
                 class="px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-sm font-bold transition-colors">↑</button>
             </div>
           </div>
 
-          <button @click="quitGame"
-            class="mt-2 px-6 py-2 bg-red-500/20 text-red-400 hover:bg-red-500 hover:text-white rounded-xl font-bold transition-all text-sm hover:shadow-lg hover:shadow-red-500/20">
-            ← {{ isSpectator ? 'Quitter le spectacle' : 'Quitter le match' }}
-          </button>
         </div>
         </Transition>
 
@@ -1009,12 +1418,21 @@ const xoWinCells = () => {
 .fade-enter-from { opacity: 0; transform: translateY(12px); }
 .fade-leave-to   { opacity: 0; transform: translateY(-8px); }
 
-.title-glow { filter: drop-shadow(0 0 40px rgba(139,92,246,0.35)); }
+.notif-enter-active, .notif-leave-active { transition: all 0.3s; }
+.notif-enter-from { opacity: 0; transform: translateX(40px); }
+.notif-leave-to   { opacity: 0; transform: translateX(40px); }
 
-.orb {
-  position: absolute; border-radius: 50%; filter: blur(80px); opacity: 0.10;
-  animation: drift 20s ease-in-out infinite alternate;
+.float-emoji {
+  animation: floatUp 2s ease-out forwards;
+  font-size: 2rem;
 }
+@keyframes floatUp {
+  0%   { opacity: 1; transform: translateY(0) scale(1); }
+  80%  { opacity: 1; }
+  100% { opacity: 0; transform: translateY(-120px) scale(1.4); }
+}
+
+.orb { position:absolute; border-radius:50%; filter:blur(80px); opacity:.10; animation:drift 20s ease-in-out infinite alternate; }
 .orb-1 { width:500px; height:500px; background:radial-gradient(circle,#6366f1,transparent); top:-100px; left:-100px; animation-duration:25s; }
 .orb-2 { width:400px; height:400px; background:radial-gradient(circle,#ec4899,transparent); bottom:-80px; right:-80px; animation-duration:18s; animation-delay:-8s; }
 .orb-3 { width:300px; height:300px; background:radial-gradient(circle,#22c55e,transparent); top:50%; left:50%; transform:translate(-50%,-50%); animation-duration:30s; animation-delay:-14s; }
@@ -1026,14 +1444,11 @@ const xoWinCells = () => {
 
 .grid-bg {
   position:absolute; inset:0;
-  background-image: linear-gradient(rgba(99,102,241,.04) 1px,transparent 1px), linear-gradient(90deg,rgba(99,102,241,.04) 1px,transparent 1px);
-  background-size: 48px 48px;
+  background-image:linear-gradient(rgba(99,102,241,.04) 1px,transparent 1px),linear-gradient(90deg,rgba(99,102,241,.04) 1px,transparent 1px);
+  background-size:48px 48px;
 }
 
-.canvas-glow       { box-shadow: 0 0 40px rgba(99,102,241,.15), 0 16px 48px rgba(0,0,0,.5); }
-.canvas-glow-green { box-shadow: 0 0 40px rgba(34,197,94,.12),  0 16px 48px rgba(0,0,0,.5); }
-
-.scrollbar-thin::-webkit-scrollbar        { width: 4px; }
-.scrollbar-thin::-webkit-scrollbar-track  { background: transparent; }
-.scrollbar-thin::-webkit-scrollbar-thumb  { background: #374151; border-radius: 2px; }
+.scrollbar-thin::-webkit-scrollbar { width:4px; }
+.scrollbar-thin::-webkit-scrollbar-track { background:transparent; }
+.scrollbar-thin::-webkit-scrollbar-thumb { background:#374151; border-radius:2px; }
 </style>

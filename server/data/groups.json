@@ -1,0 +1,99 @@
+{
+  "0d12f3fd75720083": {
+    "id": "0d12f3fd75720083",
+    "name": "ecole it",
+    "type": "private",
+    "initials": "EI",
+    "logo": "",
+    "ownerId": "1777685883784",
+    "admins": [
+      "1777685883784"
+    ],
+    "members": [
+      {
+        "id": "1777685883784",
+        "username": "mehdiiiiiiiiiiiiiiii",
+        "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=mehdiiiiiiiiiiiiiiii"
+      }
+    ],
+    "inviteCode": "4EVMPZ",
+    "chatLocked": false,
+    "bannedUsers": [],
+    "messages": [
+      {
+        "id": "1beb47a43889d367",
+        "userId": "1777685883784",
+        "username": "mehdiiiiiiiiiiiiiiii",
+        "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=mehdiiiiiiiiiiiiiiii",
+        "text": "lm",
+        "media": null,
+        "time": "2026-05-02T16:43:19.120Z"
+      },
+      {
+        "id": "1777f5fd2d187e32",
+        "userId": "1777685883784",
+        "username": "mehdiiiiiiiiiiiiiiii",
+        "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=mehdiiiiiiiiiiiiiiii",
+        "text": "SSS",
+        "media": null,
+        "time": "2026-05-02T22:05:49.099Z"
+      },
+      {
+        "id": "b8cf288734474e98",
+        "userId": "1777685883784",
+        "username": "mehdiiiiiiiiiiiiiiii",
+        "avatar": "https://api.dicebear.com/7.x/croodles/svg?seed=Charlie",
+        "text": "SS",
+        "media": null,
+        "time": "2026-05-02T22:06:09.926Z"
+      }
+    ],
+    "createdAt": 1777740072407
+  },
+  "6d7476ce1b6ed36d": {
+    "id": "6d7476ce1b6ed36d",
+    "name": "ECOLE IT",
+    "type": "private",
+    "initials": "EI",
+    "logo": null,
+    "ownerId": "1777685883784",
+    "admins": [
+      "1777685883784"
+    ],
+    "members": [
+      {
+        "id": "1777685883784",
+        "username": "mehdiiiiiiiiiiiiiiii",
+        "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=mehdiiiiiiiiiiiiiiii"
+      }
+    ],
+    "inviteCode": "MPKCKM",
+    "chatLocked": false,
+    "bannedUsers": [],
+    "messages": [],
+    "createdAt": 1777757601917
+  },
+  "3df4555dded70baa": {
+    "id": "3df4555dded70baa",
+    "name": "eocle",
+    "type": "public",
+    "initials": "E",
+    "logo": null,
+    "ownerId": "1777685883784",
+    "admins": [
+      "1777685883784"
+    ],
+    "members": [
+      {
+        "id": "1777685883784",
+        "username": "mehdiiiiiiiiiiiiiiii",
+        "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=mehdiiiiiiiiiiiiiiii"
+      }
+    ],
+    "inviteCode": "H5K7PD",
+    "chatLocked": false,
+    "bannedUsers": [],
+    "messages": [],
+    "createdAt": 1777757681173
+  }
+}
