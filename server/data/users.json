@@ -4,10 +4,13 @@
     "username": "mehdiiiiiiiiiiiiiiii",
     "email": "mehdi@gmail.com",
     "password": "123",
-    "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=mehdiiiiiiiiiiiiiiii",
+    "avatar": "https://api.dicebear.com/7.x/fun-emoji/svg?seed=India",
     "elo": 1000,
     "wins": 0,
-    "losses": 0
+    "losses": 0,
+    "avatarStyle": "fun-emoji",
+    "avatarSeed": "India",
+    "bio": ""
   },
   "moussa@gmail.com": {
     "id": "1777685945574",
@@ -15,6 +18,22 @@
     "email": "moussa@gmail.com",
     "password": "123",
     "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=moussa",
+    "elo": 1000,
+    "wins": 0,
+    "losses": 0,
+    "avatarStyle": "avataaars",
+    "avatarSeed": "<mets le username ici>",
+    "bio": ""
+  },
+  "t@t.com": {
+    "id": "1777835876142",
+    "username": "test",
+    "email": "t@t.com",
+    "password": "123",
+    "avatar": "https://api.dicebear.com/7.x/avataaars/svg?seed=test",
+    "avatarStyle": "avataaars",
+    "avatarSeed": "test",
+    "bio": "",
     "elo": 1000,
     "wins": 0,
     "losses": 0

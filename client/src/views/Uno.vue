@@ -159,37 +159,10 @@ const applyInitState = (s) => {
 // ============================================================
 // VALIDATION : peut-on jouer cette carte ?
 // ============================================================
-const canPlay = async (card) => {
-    if (!topCard.value) return true;
-//   if (card.type === 'wild') return true; // wild jouable toujours
-    if (card.type === 'wild') {
-      chosenColor = await new Promise((resolve) => {
-    Swal.fire({
-      title: 'Choisis une couleur',
-      background: '#111827', color: '#f9fafb',
-      showConfirmButton: false, allowOutsideClick: false, allowEscapeKey: false,
-      html: `
-        <div style="display:flex;gap:12px;justify-content:center;margin-top:8px;">
-          <button id="c-red"    style="width:64px;height:64px;border-radius:16px;background:#ef4444;border:none;cursor:pointer;font-size:28px;">🟥</button>
-          <button id="c-yellow" style="width:64px;height:64px;border-radius:16px;background:#eab308;border:none;cursor:pointer;font-size:28px;">🟨</button>
-          <button id="c-green"  style="width:64px;height:64px;border-radius:16px;background:#22c55e;border:none;cursor:pointer;font-size:28px;">🟩</button>
-          <button id="c-blue"   style="width:64px;height:64px;border-radius:16px;background:#3b82f6;border:none;cursor:pointer;font-size:28px;">🟦</button>
-        </div>`,
-      didOpen: () => {
-        ['red','yellow','green','blue'].forEach((c) => {
-          document.getElementById(`c-${c}`).addEventListener('click', () => {
-            Swal.close();
-            resolve(c);
-          });
-        });
-      },
-    });
-  });
-  if (!COLORS.includes(chosenColor)) chosenColor = 'red';
-}
-
-
-if (card.color === activeColor.value) return true;
+const canPlay = (card) => {
+  if (!topCard.value) return true;
+  if (card.type === 'wild') return true; // wild jouable toujours
+  if (card.color === activeColor.value) return true;
   if (card.value === topCard.value.value && topCard.value.type !== 'wild') return true;
   return false;
 };

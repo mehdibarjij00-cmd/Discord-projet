@@ -6,7 +6,7 @@ import Connexion         from './views/Connexion.vue';
 import ProfileModal      from './views/ProfileModal.vue';
 import CreateGroupModal  from './views/CreateGroupModal.vue';
 import GroupSettingsModal from './views/GroupSettingsModal.vue';
-import JoinGroupModal    from './views/JoinGroupModal.vue';
+import JoinGroupModal    from './views/Joingroupmodal.vue';
 import Tournaments       from './views/Tournaments.vue';
 
 const Swal = window.Swal;
@@ -26,6 +26,32 @@ const showProfileModal  = ref(false);
 const showCreateGroup   = ref(false);
 const showJoinGroup     = ref(false);
 const showGroupSettings = ref(false);
+const sidebarOpen       = ref(true); // 🔑 Sidebar de navigation ouverte/réduite
+
+//deconnection
+const logout = () => {
+  Swal.fire({
+    icon: 'question',
+    title: 'Se déconnecter ?',
+    text: 'Tes stats locales seront conservées.',
+    background: '#111827',
+    color: '#f9fafb',
+    confirmButtonColor: '#ef4444',
+    confirmButtonText: '🚪 Déconnexion',
+    showCancelButton: true,
+    cancelButtonText: 'Annuler',
+  }).then((res) => {
+    if (res.isConfirmed) {
+      localStorage.removeItem('user');
+      localStorage.removeItem('token');
+      // Rediriger vers la page de connexion
+      window.location.href = '/';
+    }
+  });
+};
+
+
+
 
 const currentUser = ref({
   id:          null,
@@ -210,10 +236,15 @@ const onMessageError = ({ error }) => {
 };
 
 // ── Actions sur groupes ──
-const onGroupCreated = (newGroup) => {
-  groups.value.push(newGroup);
+const onGroupCreated = async ({ id } = {}) => {
   showCreateGroup.value = false;
-  selectGroup(newGroup);
+  // Le modal n'envoie que { id } → on recharge depuis le serveur pour avoir l'objet COMPLET
+  // (avec members, admins, inviteCode, etc.)
+  await loadGroups();
+  if (id) {
+    const created = groups.value.find(g => g.id === id);
+    if (created) selectGroup(created);
+  }
 };
 
 const onGroupJoinedManual = (group) => {
@@ -347,6 +378,8 @@ const saveProfile = (data) => {
   currentUser.value.avatarStyle = data.avatarStyle;
   currentUser.value.avatarSeed  = data.avatarSeed;
   showProfileModal.value        = false;
+  // 🔑 Mettre à jour le localStorage pour que les changements survivent au refresh
+  localStorage.setItem('user', JSON.stringify(currentUser.value));
 };
 
 // ============================================================
@@ -357,7 +390,14 @@ const handleLogin = async (userData) => {
   currentUser.value.name   = userData.name;
   currentUser.value.avatar = userData.avatar;
   currentUser.value.avatarSeed = userData.name;
+  // Conserver tout ce que le serveur a renvoyé (bio, avatarStyle, elo, etc.)
+  if (userData.bio         !== undefined) currentUser.value.bio         = userData.bio;
+  if (userData.avatarStyle !== undefined) currentUser.value.avatarStyle = userData.avatarStyle;
+  if (userData.avatarSeed  !== undefined) currentUser.value.avatarSeed  = userData.avatarSeed;
   isAuthenticated.value    = true;
+
+  // 🔑 Persister la session pour survivre à un refresh
+  localStorage.setItem('user', JSON.stringify(currentUser.value));
 
   socket.connect();
   socket.emit('identify', {
@@ -368,7 +408,27 @@ const handleLogin = async (userData) => {
   await loadGroups();
 };
 
-onMounted(() => {
+onMounted(async () => {
+  // 🔑 Restaurer la session si l'utilisateur s'était déjà connecté
+  const saved = localStorage.getItem('user');
+  if (saved) {
+    try {
+      const userData = JSON.parse(saved);
+      if (userData?.id) {
+        currentUser.value = { ...currentUser.value, ...userData };
+        isAuthenticated.value = true;
+        socket.connect();
+        socket.emit('identify', {
+          userId:   currentUser.value.id,
+          username: currentUser.value.name,
+        });
+        await loadGroups();
+      }
+    } catch {
+      localStorage.removeItem('user');
+    }
+  }
+
   // Tous les listeners socket pour les groupes
   socket.on('group-message',         onGroupMessage);
   socket.on('group-system-message',  onGroupSystemMessage);
@@ -524,6 +584,22 @@ watch(activeGroupId, () => scrollChatToBottom());
       >
         <span class="text-lg">🔑</span>
       </button>
+
+<!-- BOUTON DÉCONNEXION -->
+      <div class="px-2 py-3 border-t border-gray-800">
+        <button
+          @click="logout"
+          :class="['flex items-center gap-3 rounded-xl transition-colors font-semibold text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300',
+            sidebarOpen ? 'w-full px-3 py-2.5' : 'w-10 h-10 justify-center mx-auto']"
+          :title="sidebarOpen ? '' : 'Déconnexion'"
+        >
+          <span class="text-lg shrink-0">➜]</span>
+          <!-- <span v-if="sidebarOpen">Déconnexion</span> -->
+        </button>
+      </div>
+
+
+
     </nav>
 
     <!-- ═══ SIDEBAR (groupe actif) ═══ -->
@@ -560,11 +636,11 @@ watch(activeGroupId, () => scrollChatToBottom());
         <div v-if="activeGroup">
           <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 px-1 flex items-center justify-between">
             <span>Membres</span>
-            <span class="text-gray-500 normal-case">{{ activeGroup.members.length }}</span>
+            <span class="text-gray-500 normal-case">{{ activeGroup.members?.length || 0 }}</span>
           </h3>
           <ul class="space-y-1">
             <li
-              v-for="m in activeGroup.members"
+              v-for="m in (activeGroup.members || [])"
               :key="m.id"
               class="px-2 py-1.5 rounded flex items-center gap-2 text-sm transition-colors hover:bg-gray-800"
             >
@@ -792,6 +868,7 @@ watch(activeGroupId, () => scrollChatToBottom());
     </main>
 
   </div>
+  
 </template>
 
 <style>

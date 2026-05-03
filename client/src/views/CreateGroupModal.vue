@@ -14,6 +14,8 @@ const errorMsg  = ref('');
 const Swal = window.Swal;
 
 const handleCreate = async () => {
+  console.log('[CreateGroup] click', { name: groupName.value, type: groupType.value, userId: props.currentUserId });
+
   if (!groupName.value.trim()) {
     errorMsg.value = 'Le nom du groupe ne peut pas être vide.';
     return;
@@ -26,6 +28,7 @@ const handleCreate = async () => {
   creating.value = true;
 
   try {
+    console.log('[CreateGroup] fetch start');
     const response = await fetch('http://localhost:3001/api/groups/create', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -35,10 +38,13 @@ const handleCreate = async () => {
         creatorId: props.currentUserId,
       })
     });
-    const data = await response.json();
+    console.log('[CreateGroup] response status', response.status);
+
+    const data = await response.json().catch(() => ({}));
+    console.log('[CreateGroup] response body', data);
 
     if (!response.ok) {
-      errorMsg.value = data.error || 'Erreur de création.';
+      errorMsg.value = data.error || `Erreur ${response.status}`;
       return;
     }
 
@@ -50,10 +56,11 @@ const handleCreate = async () => {
       timer: 2200, showConfirmButton: false,
     });
 
-    // Renvoyer l'id pour que App.vue recharge la liste
     emit('created', { id: data.group.id });
-  } catch {
-    errorMsg.value = 'Serveur inaccessible (port 3001 ?).';
+    emit('close'); // 🔑 On ferme la modale nous-mêmes au cas où le parent oublie
+  } catch (e) {
+    console.error('[CreateGroup] fetch error', e);
+    errorMsg.value = 'Serveur inaccessible (port 3001 ?). ' + (e?.message || '');
   } finally {
     creating.value = false;
   }

@@ -257,8 +257,8 @@ const checkTournamentEnd = (tournament) => {
 // =====================================================
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin',  '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
   if (req.method === 'OPTIONS') { res.writeHead(204); return res.end(); }
 
   // ───── Sert les uploads ─────
@@ -294,17 +294,34 @@ const server = http.createServer(async (req, res) => {
       if (Object.values(users).find(u => u.username.toLowerCase() === username.toLowerCase())) {
         res.writeHead(409); return res.end(JSON.stringify({ error:'Pseudo déjà pris.' }));
       }
+      // users[email] = {
+      //   id: Date.now().toString(),
+      //   username, email, password,
+      //   avatar: makeAvatar(username),
+      //   elo:1000, wins:0, losses:0,
+      // };
+
       users[email] = {
         id: Date.now().toString(),
         username, email, password,
-        avatar: makeAvatar(username),
+        avatar:      makeAvatar(username),
+        avatarStyle: 'avataaars',
+        avatarSeed:  username,
+        bio:         '',
         elo:1000, wins:0, losses:0,
       };
+
+
+
+
+
+
+      // 
       persistUsers();
       res.writeHead(201); return res.end(JSON.stringify({ message:'Compte créé !' }));
     } catch { res.writeHead(500); return res.end(JSON.stringify({ error:'Erreur serveur.' })); }
   }
-
+// login 
   if (req.method === 'POST' && req.url === '/api/login') {
     try {
       const { email, password } = await parseBody(req);
@@ -312,17 +329,34 @@ const server = http.createServer(async (req, res) => {
       if (!user || user.password !== password) {
         res.writeHead(401); return res.end(JSON.stringify({ error:'Email ou mot de passe incorrect.' }));
       }
+        console.log('[POST /login] RENVOIE user:', {
+        username: user.username,
+        avatar: user.avatar?.slice(0, 80),
+        avatarStyle: user.avatarStyle,
+        avatarSeed: user.avatarSeed,   });
+
+
       res.writeHead(200);
-      return res.end(JSON.stringify({
-        message:'Connexion réussie',
+
+        return res.end(JSON.stringify({
+        message: 'Connexion réussie',
         user: {
-          id:user.id, username:user.username, name:user.username,
-          email:user.email, avatar:user.avatar,
-          elo:user.elo, wins:user.wins, losses:user.losses,
-        },
-      }));
-    } catch { res.writeHead(500); return res.end(JSON.stringify({ error:'Erreur serveur.' })); }
-  }
+          id:          user.id,
+          username:    user.username,
+          name:        user.name || user.username,
+          email:       user.email,
+          avatar:      user.avatar,
+          avatarStyle: user.avatarStyle || 'avataaars',
+          avatarSeed:  user.avatarSeed  || user.username,
+          bio:         user.bio || '',
+          elo:         user.elo,
+          wins:        user.wins,
+          losses:      user.losses,
+              },
+            }));
+          } catch { res.writeHead(500); return res.end(JSON.stringify({ error:'Erreur serveur.' })); }
+        }
+    
 
   // ═════════════════ GROUPES ═════════════════
 
@@ -657,6 +691,92 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200);
     return res.end(JSON.stringify({ messages: group.messages || [] }));
   }
+
+
+// PUT /api/profile mise à jour profil (avatar, bio, name)
+if (req.method === 'PUT' && req.url === '/api/profile') {
+  const { userId, name, avatar, avatarStyle, avatarSeed, bio } = await parseBody(req);
+    console.log('[PUT /profile] REÇU:', { userId, name, avatarStyle, avatarSeed, avatar: avatar?.slice(0, 80) });
+  try {
+    // const { userId, name, avatar, avatarStyle, avatarSeed, bio } = await parseBody(req);
+    console.log('[PUT /profile] REÇU:', { userId, name, avatarStyle, avatarSeed });
+
+    if (!userId) {
+      res.writeHead(400);
+      return res.end(JSON.stringify({ error: 'userId requis.' }));
+    }
+    const user = findUserById(userId);
+    if (!user) {
+      res.writeHead(404);
+      return res.end(JSON.stringify({ error: 'Utilisateur introuvable.' }));
+    }
+
+    // Vérif unicité du pseudo si changé
+    if (name && name.trim() && name.trim() !== user.username) {
+      const taken = Object.values(users).find(u =>
+        String(u.id) !== String(userId) &&
+        u.username.toLowerCase() === name.trim().toLowerCase()
+      );
+      if (taken) {
+        res.writeHead(409);
+        return res.end(JSON.stringify({ error: 'Pseudo déjà pris.' }));
+      }
+      user.username = name.trim();
+    }
+    // Mise à jour des propriétés d'avatar
+
+    if (typeof avatarStyle === 'string') user.avatarStyle = avatarStyle;
+    if (typeof avatarSeed === 'string')  user.avatarSeed  = avatarSeed;
+    if (typeof bio === 'string')         user.bio         = bio;
+    // L'avatar est TOUJOURS recalculé depuis style seed
+    if (user.avatarStyle && user.avatarSeed) {
+      user.avatar = `https://api.dicebear.com/7.x/${user.avatarStyle}/svg?seed=${encodeURIComponent(user.avatarSeed)}`;
+    } else if (typeof avatar === 'string') {
+      user.avatar = avatar;
+    }
+
+      console.log('[PUT /profile] AVANT SAVE user en DB:', {
+      username: user.username,
+      avatar: user.avatar?.slice(0, 80),
+      avatarStyle: user.avatarStyle,
+      avatarSeed: user.avatarSeed,
+    });
+    persistUsers();
+
+    // Propager le nouvel avatar/nom dans les groupes où il est membre
+    Object.values(groups).forEach(group => {
+      const member = group.members.find(m => String(m.id) === String(userId));
+      if (member) {
+        member.username = user.username;
+        member.avatar   = user.avatar;
+      }
+      io.to(`group-${group.id}`).emit('group-updated', { group: publicGroup(group) });
+    });
+    persistGroups();
+
+    res.writeHead(200);
+    return res.end(JSON.stringify({
+      user: {
+        id:          user.id,
+        username:    user.username,
+        name:        user.username,
+        email:       user.email,
+        avatar:      user.avatar,
+        avatarStyle: user.avatarStyle,
+        avatarSeed:  user.avatarSeed,
+        bio:         user.bio || '',
+        elo:         user.elo,
+        wins:        user.wins,
+        losses:      user.losses,
+      },
+    }));
+  } catch (e) {
+    console.error('PUT /api/profile error:', e);
+    res.writeHead(500);
+    return res.end(JSON.stringify({ error: 'Erreur serveur.' }));
+  }
+}
+
 
   // ═════════════════ TOURNOIS ═════════════════
 

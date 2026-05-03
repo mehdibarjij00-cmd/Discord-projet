@@ -20,7 +20,36 @@ const avatarUrl = computed(() =>
   `https://api.dicebear.com/7.x/${selectedAvatarStyle.value}/svg?seed=${avatarSeed.value}`
 );
 
+// ✅ initPlayer : charge d'abord depuis 'user' (compte connecté), puis 'arenalink_player'
 const initPlayer = () => {
+  // Priorité 1 : compte connecté (localStorage 'user')
+  const storedUser = JSON.parse(localStorage.getItem('user') || 'null');
+  if (storedUser && storedUser.name) {
+    const saved = JSON.parse(localStorage.getItem('arenalink_player') || 'null');
+    if (saved && saved.name === storedUser.name) {
+      // Fusionner : prendre les stats locales mais l'avatar du compte
+      localPlayer.value = {
+        ...saved,
+        avatar: storedUser.avatar || saved.avatar,
+        name:   storedUser.name,
+      };
+    } else {
+      // Premier lancement avec ce compte : créer un profil arène
+      localPlayer.value = {
+        name:    storedUser.name,
+        avatar:  storedUser.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${storedUser.name}`,
+        elo:     1000,
+        wins:    0,
+        losses:  0,
+        history: [],
+      };
+      localStorage.setItem('arenalink_player', JSON.stringify(localPlayer.value));
+    }
+    showProfileSetup.value = false;
+    return;
+  }
+
+  // Priorité 2 : profil arène seul (pas de compte)
   const saved = localStorage.getItem('arenalink_player');
   if (saved) {
     localPlayer.value = JSON.parse(saved);
@@ -33,11 +62,11 @@ const initPlayer = () => {
 const saveProfile = () => {
   if (!pseudoInput.value.trim()) return;
   localPlayer.value = {
-    name: pseudoInput.value.trim(),
-    avatar: avatarUrl.value,
-    elo: 1000,
-    wins: 0,
-    losses: 0,
+    name:    pseudoInput.value.trim(),
+    avatar:  avatarUrl.value,
+    elo:     1000,
+    wins:    0,
+    losses:  0,
     history: [],
   };
   localStorage.setItem('arenalink_player', JSON.stringify(localPlayer.value));
@@ -46,6 +75,28 @@ const saveProfile = () => {
 
 const savePlayerLocal = () => {
   localStorage.setItem('arenalink_player', JSON.stringify(localPlayer.value));
+};
+
+//  DECONNEXION
+const logout = () => {
+  Swal.fire({
+    icon: 'question',
+    title: 'Se déconnecter ?',
+    text: 'Tes stats locales seront conservées.',
+    background: '#111827',
+    color: '#f9fafb',
+    confirmButtonColor: '#ef4444',
+    confirmButtonText: '🚪 Déconnexion',
+    showCancelButton: true,
+    cancelButtonText: 'Annuler',
+  }).then((res) => {
+    if (res.isConfirmed) {
+      localStorage.removeItem('user');
+      localStorage.removeItem('token');
+      // Rediriger vers la page de connexion
+      window.location.href = '/';
+    }
+  });
 };
 
 // ELO calculation
@@ -57,7 +108,7 @@ const calcElo = (myElo, oppElo, won) => {
 };
 
 const recordResult = (won, game, score) => {
-  const oppElo = 1000; // estimé si pas connu
+  const oppElo = 1000;
   const newElo = calcElo(localPlayer.value.elo, oppElo, won);
   const eloDiff = newElo - localPlayer.value.elo;
   localPlayer.value.elo = newElo;
@@ -90,7 +141,7 @@ const games = [
   { id: 'uno',   name: 'UNO',         icon: '🎴', color: 'from-red-500 via-yellow-500 to-blue-500', desc: '2-4 joueurs • Cartes' },
 ];
 
-const currentRoom = ref({ code: '', players: [], spectators: [] });
+const currentRoom = ref({ code: '', players: [], spectators: [], isSolo: false });
 
 // -------------------------------------------------------
 // NOTIFICATIONS
@@ -121,7 +172,7 @@ const refreshPublicRooms = () => {
 // -------------------------------------------------------
 // RÉACTIONS EMOJI
 // -------------------------------------------------------
-const EMOJIS = ['🔥', '😱', '🤝', '👏', '💀', '😂', '🏆', '⚡',' 🫏 ',' 🤟 ',' 👎 ','🖕',' 👿 '];
+const EMOJIS = ['🔥', '😱', '🤝', '👏', '💀', '😂', '🏆', '⚡', '🫏', '🤟', '👎', '🖕', '👿'];
 const showEmojiPicker = ref(false);
 const floatingEmojis = ref([]);
 let emojiId = 0;
@@ -129,7 +180,7 @@ let emojiId = 0;
 const sendReaction = (emoji) => {
   showEmojiPicker.value = false;
   addFloatingEmoji(emoji);
-  if (socket) {
+  if (socket && !currentRoom.value.isSolo) {
     socket.emit('game-action', {
       roomCode: currentRoom.value.code,
       game: 'reaction',
@@ -154,7 +205,7 @@ const addFloatingEmoji = (emoji) => {
 // -------------------------------------------------------
 const sidebarOpen    = ref(true);
 const activeChannel  = ref('general');
-const activeSideTab  = ref('channels'); // 'channels' | 'profile' | 'leaderboard'
+const activeSideTab  = ref('channels');
 
 const channels = [
   { id: 'general',     label: 'général',      icon: '💬' },
@@ -215,7 +266,7 @@ const sendRoomMessage = () => {
     self: true,
   };
   roomMessages.value.push(msgObj);
-  if (socket) {
+  if (socket && !currentRoom.value.isSolo) {
     socket.emit('game-action', {
       roomCode: currentRoom.value.code,
       game: 'chat',
@@ -231,23 +282,22 @@ const sendRoomMessage = () => {
 };
 
 // -------------------------------------------------------
-// LEADERBOARD (session locale + socket global)
+// LEADERBOARD
 // -------------------------------------------------------
 const globalLeaderboard = ref([]);
 
 const updateLeaderboard = () => {
   if (socket) {
     socket.emit('update-leaderboard', {
-      name: localPlayer.value.name,
+      name:   localPlayer.value.name,
       avatar: localPlayer.value.avatar,
-      elo: localPlayer.value.elo,
-      wins: localPlayer.value.wins,
+      elo:    localPlayer.value.elo,
+      wins:   localPlayer.value.wins,
       losses: localPlayer.value.losses,
     });
   }
 };
 
-// ELO rank label
 const eloRank = (elo) => {
   if (elo >= 1400) return { label: 'Diamant 💎', color: 'text-cyan-400' };
   if (elo >= 1200) return { label: 'Platine 🔷', color: 'text-blue-400' };
@@ -269,10 +319,10 @@ onMounted(() => {
     if (data.status === 'ready') {
       if (currentRoom.value.players.length === 1) {
         currentRoom.value.players.push({
-          name: data.playerName || 'Adversaire',
-          role: 'Joueur 2',
+          name:   data.playerName || 'Adversaire',
+          role:   'Joueur 2',
           avatar: data.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=Guest`,
-          elo: data.elo || 1000,
+          elo:    data.elo || 1000,
         });
         pushNotif(`${data.playerName || 'Un joueur'} a rejoint la salle !`, 'success');
       }
@@ -296,7 +346,6 @@ onMounted(() => {
     }
   });
 
-  // Invitation reçue
   socket.on('room-invite', (data) => {
     pushNotif(`🎮 ${data.from} t'invite à rejoindre ${data.roomCode} !`, 'invite', 6000);
     Swal.fire({
@@ -316,17 +365,14 @@ onMounted(() => {
     });
   });
 
-  // Rooms publiques
   socket.on('public-rooms-list', (data) => {
     publicRooms.value = data.rooms || [];
   });
 
-  // Leaderboard global
   socket.on('leaderboard-update', (data) => {
     globalLeaderboard.value = data.players || [];
   });
 
-  // Joueur rejoint en spectateur
   socket.on('spectator-joined', (data) => {
     pushNotif(`👁 ${data.name} regarde la partie`, 'info');
     if (!currentRoom.value.spectators.find(s => s.name === data.name)) {
@@ -343,7 +389,6 @@ onMounted(() => {
       });
     }
 
-    // Réactions emoji
     if (data.game === 'reaction' && data.action === 'emoji') {
       addFloatingEmoji(data.emoji);
       pushNotif(`${data.from} réagit ${data.emoji}`, 'info', 2000);
@@ -370,7 +415,6 @@ onMounted(() => {
     }
   });
 
-  // Rafraîchir leaderboard toutes les 10s
   setInterval(() => { if (socket) socket.emit('get-leaderboard'); }, 10000);
   socket.emit('get-leaderboard');
 });
@@ -404,11 +448,12 @@ const createRoom = (isPublic = false) => {
   currentRoom.value = {
     code,
     isPublic,
+    isSolo: false,
     players: [{
-      name: localPlayer.value.name || 'Toi',
-      role: 'Joueur 1',
+      name:   localPlayer.value.name || 'Toi',
+      role:   'Joueur 1',
       avatar: localPlayer.value.avatar,
-      elo: localPlayer.value.elo,
+      elo:    localPlayer.value.elo,
     }],
     spectators: [],
   };
@@ -418,13 +463,49 @@ const createRoom = (isPublic = false) => {
   if (socket) socket.emit('join-game-room', {
     code,
     isPublic,
-    gameId: selectedGame.value.id,
-    gameName: selectedGame.value.name,
+    gameId:     selectedGame.value.id,
+    gameName:   selectedGame.value.name,
     playerName: localPlayer.value.name,
-    avatar: localPlayer.value.avatar,
-    elo: localPlayer.value.elo,
+    avatar:     localPlayer.value.avatar,
+    elo:        localPlayer.value.elo,
   });
   pushNotif(`Salle ${code} créée !`, 'success');
+};
+
+// ✅ MODE SOLO : créer une room locale avec un bot, sans socket
+const createSoloRoom = () => {
+  if (!selectedGame.value) return;
+  const gameId = selectedGame.value.id;
+
+  // Snake est déjà solo, pas besoin de cette fonction
+  if (gameId === 'snake') {
+    currentRoom.value = { code: 'SOLO', isSolo: true, players: [{ name: localPlayer.value.name, role: 'Joueur 1', avatar: localPlayer.value.avatar, elo: localPlayer.value.elo }], spectators: [] };
+    isSpectator.value = false;
+    roomMessages.value = [];
+    startGame();
+    return;
+  }
+
+  currentRoom.value = {
+    code:    'SOLO',
+    isSolo:  true,
+    isPublic: false,
+    players: [
+      { name: localPlayer.value.name || 'Toi',  role: 'Joueur 1', avatar: localPlayer.value.avatar, elo: localPlayer.value.elo },
+      { name: '🤖 Bot',                          role: 'Joueur 2', avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=AIBot', elo: 1000 },
+    ],
+    spectators: [],
+  };
+  isSpectator.value  = false;
+  roomMessages.value = [];
+  currentStep.value  = 'playing';
+
+  nextTick(() => {
+    if (gameId === 'pong')  initNeonPong();
+    if (gameId === 'xo')    xoReset(true); // reset propre, prêt à jouer
+  });
+
+  pushNotif(`Mode Solo activé — Affronte le 🤖 Bot !`, 'info');
 };
 
 const joinRoom = () => {
@@ -434,6 +515,7 @@ const joinRoom = () => {
     return;
   }
   currentRoom.value.code = code;
+  currentRoom.value.isSolo = false;
   currentRoom.value.players = [
     { name: 'Hôte', role: 'Joueur 1', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Host`, elo: 1000 },
     { name: localPlayer.value.name || 'Toi', role: 'Joueur 2', avatar: localPlayer.value.avatar, elo: localPlayer.value.elo },
@@ -444,8 +526,8 @@ const joinRoom = () => {
   if (socket) socket.emit('join-game-room', {
     code,
     playerName: localPlayer.value.name,
-    avatar: localPlayer.value.avatar,
-    elo: localPlayer.value.elo,
+    avatar:     localPlayer.value.avatar,
+    elo:        localPlayer.value.elo,
   });
 };
 
@@ -488,6 +570,7 @@ const _doJoinSpectator = (code) => {
   selectedGame.value = matchedGame;
   currentRoom.value = {
     code,
+    isSolo: false,
     players: [
       { name: 'Joueur 1 (Hôte)', role: 'Joueur 1', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Host`, elo: 1000 },
       { name: 'Joueur 2',        role: 'Joueur 2', avatar: `https://api.dicebear.com/7.x/avataaars/svg?seed=Guest`, elo: 1000 },
@@ -500,12 +583,11 @@ const _doJoinSpectator = (code) => {
   if (socket) socket.emit('join-game-room', {
     code, spectator: true,
     playerName: localPlayer.value.name,
-    avatar: localPlayer.value.avatar,
+    avatar:     localPlayer.value.avatar,
   });
   pushNotif(`Tu regardes la salle ${code}`, 'info');
 };
 
-// Lien d'invitation
 const copyInviteLink = () => {
   const link = `${window.location.origin}?join=${currentRoom.value.code}`;
   navigator.clipboard.writeText(link);
@@ -515,11 +597,11 @@ const copyInviteLink = () => {
 const sendSocketInvite = (targetName) => {
   if (!socket) return;
   socket.emit('send-invite', {
-    to: targetName,
-    from: localPlayer.value.name,
+    to:       targetName,
+    from:     localPlayer.value.name,
     roomCode: currentRoom.value.code,
-    gameId: selectedGame.value?.id,
-    game: selectedGame.value?.name,
+    gameId:   selectedGame.value?.id,
+    game:     selectedGame.value?.name,
   });
   pushNotif(`Invitation envoyée à ${targetName}`, 'success');
 };
@@ -545,7 +627,7 @@ const goBack = () => {
   selectedGame.value = null;
   roomCode.value     = '';
   isSpectator.value  = false;
-  currentRoom.value  = { code: '', players: [], spectators: [] };
+  currentRoom.value  = { code: '', players: [], spectators: [], isSolo: false };
   roomMessages.value = [];
 };
 
@@ -563,7 +645,7 @@ const stopAllGames = () => {
 onUnmounted(() => { stopAllGames(); if (socket) socket.disconnect(); });
 
 // -------------------------------------------------------
-// PONG
+// PONG (avec IA bot pour le mode solo)
 // -------------------------------------------------------
 const canvasRef = ref(null);
 const pongScore = ref({ p1: 0, p2: 0 });
@@ -579,14 +661,19 @@ const initNeonPong = () => {
   const W = 800, H = 450;
   canvas.width = W; canvas.height = H;
   const PADDLE_W = 12, PADDLE_H = 90, SPEED_INC = 0.4;
-  const isHost  = currentRoom.value.players[0]?.name === localPlayer.value.name;
-  const isGuest = currentRoom.value.players[1]?.name === localPlayer.value.name;
+
+  const isSolo  = currentRoom.value.isSolo;
+  const isHost  = isSolo || currentRoom.value.players[0]?.name === localPlayer.value.name;
+  const isGuest = !isSolo && currentRoom.value.players[1]?.name === localPlayer.value.name;
+
   pPad1 = { x: 20, y: H / 2 - PADDLE_H / 2 };
   pPad2 = { x: W - 32, y: H / 2 - PADDLE_H / 2 };
+
   const keys = {};
   canvas.setAttribute('tabindex', '0');
   canvas.style.outline = 'none';
   if (!isSpectator.value) canvas.focus();
+
   const PONG_KEYS = ['w', 'W', 's', 'S', 'ArrowUp', 'ArrowDown'];
   const onKey = (e) => {
     if (['INPUT', 'TEXTAREA'].includes(e.target?.tagName)) return;
@@ -596,9 +683,13 @@ const initNeonPong = () => {
   };
   window.addEventListener('keydown', onKey);
   window.addEventListener('keyup',   onKey);
+
   if (isHost) {
     pBall = { x: W/2, y: H/2, r: 10, dx: (4+Math.random()), dy: (3+Math.random()*2)*(Math.random()>0.5?1:-1) };
   }
+
+  if (pongAnimId) { cancelAnimationFrame(pongAnimId); pongAnimId = null; }
+
   const draw = () => {
     ctx.fillStyle = 'rgba(15,23,42,0.92)';
     ctx.fillRect(0, 0, W, H);
@@ -606,6 +697,7 @@ const initNeonPong = () => {
     ctx.beginPath(); ctx.moveTo(W/2,0); ctx.lineTo(W/2,H);
     ctx.strokeStyle='#1e293b'; ctx.lineWidth=2; ctx.stroke();
     ctx.setLineDash([]);
+
     const drawPaddle = (x,y,color,glow) => {
       ctx.shadowBlur=18; ctx.shadowColor=glow; ctx.fillStyle=color;
       ctx.beginPath(); ctx.roundRect(x,y,PADDLE_W,PADDLE_H,6); ctx.fill();
@@ -613,34 +705,55 @@ const initNeonPong = () => {
     };
     drawPaddle(pPad1.x,pPad1.y,'#818cf8','#6366f1');
     drawPaddle(pPad2.x,pPad2.y,'#fb7185','#f43f5e');
+
     ctx.shadowBlur=20; ctx.shadowColor='#ffffff'; ctx.fillStyle='#ffffff';
     ctx.beginPath(); ctx.arc(pBall.x,pBall.y,pBall.r,0,Math.PI*2); ctx.fill();
     ctx.shadowBlur=0;
+
     ctx.font='bold 40px monospace';
     ctx.fillStyle='#818cf8'; ctx.fillText(pongScore.value.p1,W/2-70,60);
     ctx.fillStyle='#fb7185'; ctx.fillText(pongScore.value.p2,W/2+30,60);
+
     if (!isSpectator.value) {
       if (isHost) {
+        // Contrôle joueur 1
         if ((keys['w']||keys['W']||keys['ArrowUp'])   && pPad1.y>0)           pPad1.y-=7;
         if ((keys['s']||keys['S']||keys['ArrowDown']) && pPad1.y+PADDLE_H<H)  pPad1.y+=7;
+
+        // ✅ IA bot pour le paddle 2 en mode solo
+        if (isSolo) {
+          const botSpeed = 4.5;
+          const botCenter = pPad2.y + PADDLE_H / 2;
+          if (botCenter < pBall.y - 10 && pPad2.y + PADDLE_H < H) pPad2.y += botSpeed;
+          if (botCenter > pBall.y + 10 && pPad2.y > 0)            pPad2.y -= botSpeed;
+        }
+
+        // Physique balle
         pBall.x+=pBall.dx; pBall.y+=pBall.dy;
         if (pBall.y-pBall.r<0)  { pBall.y=pBall.r;     pBall.dy= Math.abs(pBall.dy); }
         if (pBall.y+pBall.r>H)  { pBall.y=H-pBall.r;   pBall.dy=-Math.abs(pBall.dy); }
+
+        // Collision paddle 1
         if (pBall.x-pBall.r<pPad1.x+PADDLE_W && pBall.y>pPad1.y && pBall.y<pPad1.y+PADDLE_H && pBall.dx<0) {
           pBall.dx=Math.abs(pBall.dx)+SPEED_INC;
           pBall.dy=((pBall.y-(pPad1.y+PADDLE_H/2))/(PADDLE_H/2))*6;
         }
+        // Collision paddle 2
         if (pBall.x+pBall.r>pPad2.x && pBall.y>pPad2.y && pBall.y<pPad2.y+PADDLE_H && pBall.dx>0) {
           pBall.dx=-(Math.abs(pBall.dx)+SPEED_INC);
           pBall.dy=((pBall.y-(pPad2.y+PADDLE_H/2))/(PADDLE_H/2))*6;
         }
-        if (pBall.x<0) { pongScore.value.p2++; checkPongWinner(-1); return; }
-        if (pBall.x>W) { pongScore.value.p1++; checkPongWinner(1);  return; }
-        if (socket) socket.emit('game-action', {
+
+        if (pBall.x<0) { pongScore.value.p2++; cancelAnimationFrame(pongAnimId); pongAnimId=null; checkPongWinner(-1); return; }
+        if (pBall.x>W) { pongScore.value.p1++; cancelAnimationFrame(pongAnimId); pongAnimId=null; checkPongWinner(1);  return; }
+
+        // En mode multijoueur, envoyer l'état au guest
+        if (!isSolo && socket) socket.emit('game-action', {
           roomCode: currentRoom.value.code, game:'pong', action:'host-update',
           ball:{x:pBall.x,y:pBall.y,dx:pBall.dx,dy:pBall.dy},
           pad1Y:pPad1.y, score:pongScore.value,
         });
+
       } else if (isGuest) {
         if ((keys['w']||keys['W']||keys['ArrowUp'])   && pPad2.y>0)           pPad2.y-=7;
         if ((keys['s']||keys['S']||keys['ArrowDown']) && pPad2.y+PADDLE_H<H)  pPad2.y+=7;
@@ -653,6 +766,7 @@ const initNeonPong = () => {
     pongAnimId = requestAnimationFrame(draw);
   };
   draw();
+
   window.__pongCleanup = () => {
     window.removeEventListener('keydown', onKey);
     window.removeEventListener('keyup',   onKey);
@@ -662,10 +776,14 @@ const initNeonPong = () => {
 const checkPongWinner = (dir) => {
   if (pongScore.value.p1>=MAX_SCORE || pongScore.value.p2>=MAX_SCORE) {
     const winner = pongScore.value.p1>=MAX_SCORE ? 'Joueur 1' : 'Joueur 2';
-    const iWon = (winner==='Joueur 1' && currentRoom.value.players[0]?.name===localPlayer.value.name)
-              || (winner==='Joueur 2' && currentRoom.value.players[1]?.name===localPlayer.value.name);
+    const isSolo = currentRoom.value.isSolo;
+    const iWon = isSolo
+      ? winner === 'Joueur 1'
+      : (winner==='Joueur 1' && currentRoom.value.players[0]?.name===localPlayer.value.name)
+     || (winner==='Joueur 2' && currentRoom.value.players[1]?.name===localPlayer.value.name);
+
     if (!isSpectator.value) recordResult(iWon, 'Neon Pong', `${pongScore.value.p1}-${pongScore.value.p2}`);
-    if (socket) socket.emit('game-action', { roomCode:currentRoom.value.code, game:'pong', action:'pong-win', winner });
+    if (!isSolo && socket) socket.emit('game-action', { roomCode:currentRoom.value.code, game:'pong', action:'pong-win', winner });
     triggerPongWin(winner);
   } else {
     pBall = { x:400, y:225, r:10, dx:(4+Math.random())*dir, dy:(3+Math.random()*2)*(Math.random()>0.5?1:-1) };
@@ -683,7 +801,7 @@ const triggerPongWin = (winner, isFromOpponent=false) => {
     confirmButtonText: isSpectator.value ? 'Retour' : 'Rejouer',
   }).then(()=>{
     if (!isSpectator.value) {
-      if (!isFromOpponent && socket) socket.emit('game-action',{roomCode:currentRoom.value.code,game:'pong',action:'pong-reset'});
+      if (!isFromOpponent && !currentRoom.value.isSolo && socket) socket.emit('game-action',{roomCode:currentRoom.value.code,game:'pong',action:'pong-reset'});
       pongScore.value={p1:0,p2:0};
       nextTick(()=>initNeonPong());
     } else { currentStep.value='lobby'; }
@@ -691,7 +809,7 @@ const triggerPongWin = (winner, isFromOpponent=false) => {
 };
 
 // -------------------------------------------------------
-// SNAKE
+// SNAKE (solo uniquement, inchangé)
 // -------------------------------------------------------
 const snakeCanvasRef = ref(null);
 const snakeScore     = ref(0);
@@ -708,6 +826,7 @@ const initSnake = () => {
   let snake=[{x:15,y:11},{x:14,y:11},{x:13,y:11}];
   let dir={x:1,y:0}, next={x:1,y:0};
   let food=randomFood(snake), alive=true;
+
   const onKey=(e)=>{
     if (['INPUT','TEXTAREA'].includes(e.target?.tagName)) return;
     const map={ArrowUp:{x:0,y:-1},ArrowDown:{x:0,y:1},ArrowLeft:{x:-1,y:0},ArrowRight:{x:1,y:0},w:{x:0,y:-1},s:{x:0,y:1},a:{x:-1,y:0},d:{x:1,y:0}};
@@ -715,6 +834,7 @@ const initSnake = () => {
     if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) e.preventDefault();
   };
   window.addEventListener('keydown',onKey);
+
   const tick=()=>{
     if (!alive) return;
     dir=next;
@@ -729,6 +849,7 @@ const initSnake = () => {
     } else { snake.pop(); }
     render();
   };
+
   const render=()=>{
     ctx.fillStyle='#0f172a'; ctx.fillRect(0,0,canvas.width,canvas.height);
     ctx.strokeStyle='#1e293b'; ctx.lineWidth=0.5;
@@ -745,6 +866,7 @@ const initSnake = () => {
     ctx.beginPath(); ctx.arc(food.x*CELL+CELL/2,food.y*CELL+CELL/2,CELL/2-3,0,Math.PI*2); ctx.fill();
     ctx.shadowBlur=0;
   };
+
   const gameOver=()=>{
     alive=false; snakeRunning.value=false;
     clearInterval(snakeInterval); window.removeEventListener('keydown',onKey);
@@ -760,6 +882,7 @@ const initSnake = () => {
       else currentStep.value='lobby';
     });
   };
+
   render();
   if (snakeInterval) clearInterval(snakeInterval);
   snakeInterval=setInterval(tick,120);
@@ -774,7 +897,7 @@ const randomFood=(snake)=>{
 };
 
 // -------------------------------------------------------
-// TIC-TAC-TOE
+// TIC-TAC-TOE (avec IA bot pour le mode solo)
 // -------------------------------------------------------
 const xoBoard=ref(Array(9).fill(null));
 const xoCurrentPlayer=ref('X');
@@ -783,43 +906,93 @@ const xoDraw=ref(false);
 const xoScore=ref({X:0,O:0});
 const WINS=[[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
 
-const xoPlay=(idx,isFromOpponent=false)=>{
+// ✅ IA simple pour Tic-Tac-Toe
+const xoBotPlay = () => {
+  if (xoWinner.value || xoDraw.value) return;
+
+  // 1. Gagner si possible
+  for (const [a,b,c] of WINS) {
+    const cells = [xoBoard.value[a], xoBoard.value[b], xoBoard.value[c]];
+    if (cells.filter(v=>v==='O').length===2 && cells.includes(null)) {
+      const idx = [a,b,c][cells.indexOf(null)];
+      xoPlay(idx, true); return;
+    }
+  }
+  // 2. Bloquer le joueur
+  for (const [a,b,c] of WINS) {
+    const cells = [xoBoard.value[a], xoBoard.value[b], xoBoard.value[c]];
+    if (cells.filter(v=>v==='X').length===2 && cells.includes(null)) {
+      const idx = [a,b,c][cells.indexOf(null)];
+      xoPlay(idx, true); return;
+    }
+  }
+  // 3. Centre, coins, bords
+  const priority = [4, 0, 2, 6, 8, 1, 3, 5, 7];
+  const move = priority.find(i => !xoBoard.value[i]);
+  if (move !== undefined) xoPlay(move, true);
+};
+
+const xoPlay=(idx, isFromOpponent=false)=>{
   if (xoBoard.value[idx]||xoWinner.value||xoDraw.value) return;
-  if (!isFromOpponent){
+
+  const isSolo = currentRoom.value.isSolo;
+
+  if (!isFromOpponent && !isSolo) {
     if (currentRoom.value.players[0]?.name===localPlayer.value.name && xoCurrentPlayer.value!=='X') return;
     if (currentRoom.value.players[1]?.name===localPlayer.value.name && xoCurrentPlayer.value!=='O') return;
   }
+
+  // En mode solo : le joueur joue toujours X, ne pas jouer quand c'est le tour du bot
+  if (!isFromOpponent && isSolo && xoCurrentPlayer.value !== 'X') return;
+
   guardSpectator(()=>{
     xoBoard.value[idx]=xoCurrentPlayer.value;
-    if (!isFromOpponent && socket)
+
+    // Envoyer au socket en mode multijoueur uniquement
+    if (!isFromOpponent && !isSolo && socket)
       socket.emit('game-action',{roomCode:currentRoom.value.code,game:'xo',action:'play',idx});
+
     const win=WINS.find(([a,b,c])=>xoBoard.value[a]&&xoBoard.value[a]===xoBoard.value[b]&&xoBoard.value[a]===xoBoard.value[c]);
     if (win){
       xoWinner.value=xoCurrentPlayer.value;
       xoScore.value[xoCurrentPlayer.value]++;
-      const iWon = (xoCurrentPlayer.value==='X'&&currentRoom.value.players[0]?.name===localPlayer.value.name)
-                || (xoCurrentPlayer.value==='O'&&currentRoom.value.players[1]?.name===localPlayer.value.name);
+      const iWon = isSolo
+        ? xoCurrentPlayer.value === 'X'
+        : (xoCurrentPlayer.value==='X'&&currentRoom.value.players[0]?.name===localPlayer.value.name)
+       || (xoCurrentPlayer.value==='O'&&currentRoom.value.players[1]?.name===localPlayer.value.name);
+
       if (!isFromOpponent){
         recordResult(iWon,'Tic-Tac-Toe',`Joueur ${xoCurrentPlayer.value} gagne`);
         updateLeaderboard();
-        Swal.fire({icon:'success',title:`🏆 Joueur ${xoWinner.value} gagne !`,background:'#111827',color:'#f9fafb',confirmButtonColor:'#6366f1',confirmButtonText:'Rejouer'}).then(()=>xoReset());
+        Swal.fire({
+          icon: iWon ? 'success' : 'error',
+          title: iWon ? `🏆 Tu gagnes !` : `🤖 Le Bot gagne !`,
+          background:'#111827',color:'#f9fafb',confirmButtonColor:'#6366f1',confirmButtonText:'Rejouer'
+        }).then(()=>xoReset());
       }
       return;
     }
+
     if (xoBoard.value.every(c=>c!==null)){
       xoDraw.value=true;
       if (!isFromOpponent)
         Swal.fire({icon:'info',title:'🤝 Match nul !',background:'#111827',color:'#f9fafb',confirmButtonColor:'#6366f1',confirmButtonText:'Rejouer'}).then(()=>xoReset());
       return;
     }
+
     xoCurrentPlayer.value=xoCurrentPlayer.value==='X'?'O':'X';
+
+    // ✅ En mode solo, faire jouer le bot après un délai
+    if (isSolo && xoCurrentPlayer.value === 'O' && !xoWinner.value && !xoDraw.value) {
+      setTimeout(() => xoBotPlay(), 450);
+    }
   });
 };
 
 const xoReset=(isFromOpponent=false)=>{
   xoBoard.value=Array(9).fill(null);
   xoCurrentPlayer.value='X'; xoWinner.value=null; xoDraw.value=false;
-  if (!isFromOpponent && socket)
+  if (!isFromOpponent && !currentRoom.value.isSolo && socket)
     socket.emit('game-action',{roomCode:currentRoom.value.code,game:'xo',action:'reset'});
 };
 
@@ -837,6 +1010,10 @@ const winRate = computed(()=>{
   if (total===0) return 0;
   return Math.round((localPlayer.value.wins/total)*100);
 });
+
+// UNO handlers
+const onUnoWin  = () => { recordResult(true,  'UNO', 'Victoire'); updateLeaderboard(); };
+const onUnoLoss = () => { recordResult(false, 'UNO', 'Défaite');  updateLeaderboard(); };
 </script>
 
 <template>
@@ -847,7 +1024,6 @@ const winRate = computed(()=>{
       <h2 class="text-3xl font-black text-center mb-2 bg-gradient-to-r from-indigo-400 to-pink-400 bg-clip-text text-transparent">Bienvenue sur ArenaLink</h2>
       <p class="text-gray-400 text-center text-sm mb-8">Crée ton profil pour commencer</p>
 
-      <!-- Avatar preview -->
       <div class="flex flex-col items-center gap-4 mb-6">
         <div class="relative">
           <img :src="avatarUrl" class="w-24 h-24 rounded-full ring-4 ring-indigo-500/50 bg-gray-800" />
@@ -1013,12 +1189,25 @@ const winRate = computed(()=>{
       <div v-if="sidebarOpen" class="px-3 py-3 border-t border-gray-800">
         <div v-if="currentRoom.code" class="flex items-center gap-2 text-xs text-green-400">
           <span class="w-2 h-2 rounded-full bg-green-400 animate-pulse"></span>
-          <span class="font-mono truncate">{{ currentRoom.code }}</span>
+          <span class="font-mono truncate">{{ currentRoom.isSolo ? '🤖 SOLO' : currentRoom.code }}</span>
         </div>
         <div v-else class="flex items-center gap-2 text-xs text-gray-600">
           <span class="w-2 h-2 rounded-full bg-gray-600"></span>
           <span>Hors salle</span>
         </div>
+      </div>
+
+      <!-- ✅ BOUTON DÉCONNEXION -->
+      <div class="px-2 py-3 border-t border-gray-800">
+        <button
+          @click="logout"
+          :class="['flex items-center gap-3 rounded-xl transition-colors font-semibold text-sm text-red-400 hover:bg-red-500/10 hover:text-red-300',
+            sidebarOpen ? 'w-full px-3 py-2.5' : 'w-10 h-10 justify-center mx-auto']"
+          :title="sidebarOpen ? '' : 'Déconnexion'"
+        >
+          <span class="text-lg shrink-0">🚪</span>
+          <span v-if="sidebarOpen">Déconnexion</span>
+        </button>
       </div>
 
       <!-- Chat channel intégré -->
@@ -1078,7 +1267,7 @@ const winRate = computed(()=>{
             <p class="text-gray-400 text-lg">Bonjour <span class="text-indigo-400 font-bold">{{ localPlayer.name }}</span> — Choisis un jeu !</p>
           </div>
 
-          <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
             <div v-for="game in games" :key="game.id"
               @click="selectGame(game)"
               class="relative p-[2px] rounded-2xl cursor-pointer group hover:scale-[1.04] transition-all duration-300 shadow-xl"
@@ -1152,6 +1341,15 @@ const winRate = computed(()=>{
                 class="w-full py-3.5 bg-purple-600/80 hover:bg-purple-500 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2">
                 🌍 Salle publique (Joueur 1)
               </button>
+
+              <!-- ✅ BOUTON SOLO (affiché pour Pong, XO et Snake) -->
+              <button
+                v-if="selectedGame.id === 'pong' || selectedGame.id === 'xo' || selectedGame.id === 'snake'"
+                @click="createSoloRoom"
+                class="w-full py-3.5 bg-emerald-600 hover:bg-emerald-500 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-600/20">
+                🤖 Jouer contre le Bot (Solo)
+              </button>
+
               <div class="flex items-center gap-4 text-gray-500 text-sm">
                 <div class="flex-1 h-px bg-gray-700"></div>OU<div class="flex-1 h-px bg-gray-700"></div>
               </div>
@@ -1213,8 +1411,7 @@ const winRate = computed(()=>{
                   <span :class="['text-xs font-bold', eloRank(player.elo||1000).color]">{{ eloRank(player.elo||1000).label }}</span>
                   <span class="font-mono text-xs text-gray-400">{{ player.elo || 1000 }} ELO</span>
                 </div>
-                <!-- Bouton invitation socket -->
-                <button v-if="i===1 && !isSpectator && player.name!==localPlayer.name"
+                <button v-if="i===1 && !isSpectator && player.name!==localPlayer.name && !currentRoom.isSolo"
                   @click="sendSocketInvite(player.name)"
                   class="mt-2 w-full py-1 bg-indigo-600/20 hover:bg-indigo-600/40 text-indigo-400 rounded-lg text-xs font-semibold transition">
                   📨 Inviter
@@ -1264,6 +1461,12 @@ const winRate = computed(()=>{
             <span>👁</span> Mode Spectateur — Interactions désactivées
           </div>
 
+          <!-- ✅ Badge mode solo -->
+          <div v-if="currentRoom.isSolo"
+            class="w-full max-w-4xl flex items-center gap-3 px-4 py-2.5 bg-emerald-500/10 border border-emerald-500/40 rounded-xl text-emerald-300 text-sm font-semibold">
+            <span>🤖</span> Mode Solo — Tu joues contre le Bot
+          </div>
+
           <!-- PONG -->
           <template v-if="selectedGame.id==='pong'">
             <div class="flex justify-between w-full max-w-4xl px-2 mb-2">
@@ -1310,20 +1513,20 @@ const winRate = computed(()=>{
           <template v-if="selectedGame.id==='xo'">
             <div class="flex gap-12 mb-4">
               <div class="flex flex-col items-center">
-                <span class="text-xs text-gray-400 uppercase">Joueur X</span>
+                <span class="text-xs text-gray-400 uppercase">{{ currentRoom.isSolo ? 'Toi (X)' : 'Joueur X' }}</span>
                 <span class="text-4xl font-black text-pink-400 font-mono">{{ xoScore.X }}</span>
               </div>
               <div class="flex flex-col items-center justify-center">
                 <span class="text-sm text-gray-500">
-                  {{ xoWinner ? `🏆 Joueur ${xoWinner} gagne !` : xoDraw ? '🤝 Match nul !' : `Tour : Joueur ${xoCurrentPlayer}` }}
+                  {{ xoWinner ? `🏆 ${currentRoom.isSolo && xoWinner==='X' ? 'Tu gagnes !' : currentRoom.isSolo && xoWinner==='O' ? '🤖 Bot gagne !' : `Joueur ${xoWinner} gagne !`}` : xoDraw ? '🤝 Match nul !' : currentRoom.isSolo ? (xoCurrentPlayer==='X' ? '🎯 Ton tour !' : '🤖 Bot réfléchit…') : `Tour : Joueur ${xoCurrentPlayer}` }}
                 </span>
               </div>
               <div class="flex flex-col items-center">
-                <span class="text-xs text-gray-400 uppercase">Joueur O</span>
+                <span class="text-xs text-gray-400 uppercase">{{ currentRoom.isSolo ? '🤖 Bot (O)' : 'Joueur O' }}</span>
                 <span class="text-4xl font-black text-indigo-400 font-mono">{{ xoScore.O }}</span>
               </div>
             </div>
-            <div class="grid grid-cols-3 gap-3" style="width:300px;" :class="isSpectator?'pointer-events-none opacity-80':''">
+            <div class="grid grid-cols-3 gap-3" style="width:300px;" :class="isSpectator || (currentRoom.isSolo && xoCurrentPlayer==='O') ?'pointer-events-none opacity-80':''">
               <button v-for="(cell, i) in xoBoard" :key="i" @click="xoPlay(i)"
                 :class="['w-24 h-24 rounded-2xl font-black text-4xl border-2 transition-all duration-200',
                   xoWinCells().includes(i)?'border-yellow-400 bg-yellow-400/10 scale-105':'border-gray-700 bg-gray-800/80 hover:bg-gray-700 hover:border-gray-500 hover:scale-105',
@@ -1338,8 +1541,7 @@ const winRate = computed(()=>{
 
           <!-- UNO -->
           <template v-if="selectedGame.id === 'uno'">
-            <!-- <div class="w-full"> -->
-              <Uno
+            <Uno
               :room-code="currentRoom.code"
               :local-player="localPlayer"
               :is-host="currentRoom.players[0]?.name === localPlayer.name"
@@ -1348,13 +1550,11 @@ const winRate = computed(()=>{
               @quit="goBack"
               @win="onUnoWin"
               @loss="onUnoLoss"
-              />
-    
+            />
           </template>
 
           <!-- ── Barre actions en jeu ── -->
           <div class="w-full max-w-4xl flex items-center gap-3">
-            <!-- Réactions emoji -->
             <div class="relative">
               <button @click="showEmojiPicker=!showEmojiPicker"
                 class="px-4 py-2 bg-gray-800 hover:bg-gray-700 border border-gray-700 rounded-xl text-sm font-bold transition">
@@ -1380,7 +1580,8 @@ const winRate = computed(()=>{
           <div class="w-full max-w-4xl bg-gray-900/80 border border-gray-700/60 rounded-2xl overflow-hidden">
             <div class="px-4 py-2 border-b border-gray-700/60 flex items-center gap-2 text-xs font-semibold text-gray-400">
               💬 Chat de la salle
-              <span v-if="isSpectator" class="ml-auto text-yellow-500/80">👁 spectateur</span>
+              <span v-if="currentRoom.isSolo" class="ml-auto text-emerald-500/80">🤖 Solo</span>
+              <span v-else-if="isSpectator" class="ml-auto text-yellow-500/80">👁 spectateur</span>
             </div>
             <div id="arena-chat-box" class="h-28 overflow-y-auto p-3 space-y-1.5 scrollbar-thin">
               <div v-if="roomMessages.length===0" class="text-center text-gray-600 text-xs mt-4">Aucun message…</div>
