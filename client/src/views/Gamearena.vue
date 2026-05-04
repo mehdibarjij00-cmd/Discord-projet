@@ -144,6 +144,12 @@ const games = [
 const currentRoom = ref({ code: '', players: [], spectators: [], isSolo: false });
 
 // -------------------------------------------------------
+// SYNCHRO LANCEMENT DE PARTIE (les 2 joueurs doivent cliquer)
+// -------------------------------------------------------
+const localReady    = ref(false); // moi, j'ai cliqué sur "Lancer la partie"
+const opponentReady = ref(false); // l'adversaire a cliqué
+
+// -------------------------------------------------------
 // NOTIFICATIONS
 // -------------------------------------------------------
 const notifications = ref([]);
@@ -332,7 +338,19 @@ socket = io(import.meta.env.VITE_API_URL);
     }
   });
 
-  socket.on('game-start', () => { startGame(); });
+  socket.on('game-start', () => { launchGameNow(); });
+
+  // L'adversaire a cliqué sur "Lancer la partie"
+  socket.on('opponent-ready', (data) => {
+    opponentReady.value = true;
+    pushNotif(`🎯 ${data?.playerName || 'Ton adversaire'} est prêt !`, 'info');
+  });
+
+  // Quelqu'un quitte la salle → reset des "ready"
+  socket.on('player-left', () => {
+    localReady.value    = false;
+    opponentReady.value = false;
+  });
 
   socket.on('channel-message', (data) => {
     if (channelMessages.value[data.channel]) {
@@ -482,6 +500,8 @@ const createSoloRoom = () => {
     currentRoom.value = { code: 'SOLO', isSolo: true, players: [{ name: localPlayer.value.name, role: 'Joueur 1', avatar: localPlayer.value.avatar, elo: localPlayer.value.elo }], spectators: [] };
     isSpectator.value = false;
     roomMessages.value = [];
+    localReady.value    = false;
+    opponentReady.value = false;
     startGame();
     return;
   }
@@ -611,15 +631,61 @@ const copyCode = () => {
   pushNotif('Code copié !', 'success');
 };
 
+// 👉 Appelée quand JE clique sur "Lancer la partie".
+//    Ne lance PAS la partie tout de suite — signale juste qu'on est prêt.
+//    La partie ne démarre QUE quand les 2 joueurs sont prêts (event 'game-start' du serveur).
 const startGame = () => {
+  // Cas spectateur : on suit la partie, pas besoin d'attendre
+  if (isSpectator.value) {
+    launchGameNow();
+    return;
+  }
+
+  // Cas solo : pas d'adversaire à attendre, on lance direct
+  if (currentRoom.value.isSolo) {
+    launchGameNow();
+    return;
+  }
+
+  // Cas multi : si on est seul dans la salle, on bloque
+  if (currentRoom.value.players.length < 2) {
+    pushNotif("⏳ En attente d'un second joueur dans la salle…", 'warning');
+    return;
+  }
+
+  // Évite de spammer le bouton
+  if (localReady.value) return;
+
+  localReady.value = true;
+  pushNotif("✅ Tu es prêt ! En attente de l'adversaire…", 'info');
+
+  if (socket) {
+    socket.emit('player-ready', {
+      code:       currentRoom.value.code,
+      playerName: localPlayer.value.name,
+    });
+  }
+};
+
+// 👉 Lance VRAIMENT la partie (appelée seulement quand TOUT le monde est prêt,
+//    ou en mode solo / spectateur).
+const launchGameNow = () => {
   currentStep.value = 'playing';
+  // reset pour la prochaine partie
+  localReady.value    = false;
+  opponentReady.value = false;
   nextTick(() => {
     if (selectedGame.value.id === 'pong')  initNeonPong();
     if (selectedGame.value.id === 'snake') initSnake();
   });
 };
 
-const quitGame = () => { stopAllGames(); currentStep.value = 'lobby'; };
+const quitGame = () => {
+  stopAllGames();
+  currentStep.value = 'lobby';
+  localReady.value    = false;
+  opponentReady.value = false;
+};
 
 const goBack = () => {
   stopAllGames();
@@ -629,6 +695,8 @@ const goBack = () => {
   isSpectator.value  = false;
   currentRoom.value  = { code: '', players: [], spectators: [], isSolo: false };
   roomMessages.value = [];
+  localReady.value    = false;
+  opponentReady.value = false;
 };
 
 let pongAnimId    = null;
@@ -1437,8 +1505,20 @@ const onUnoLoss = () => { recordResult(false, 'UNO', 'Défaite');  updateLeaderb
             <div class="mt-6 flex justify-between items-center">
               <button @click="goBack" class="px-5 py-2.5 bg-gray-700 hover:bg-gray-600 rounded-xl text-sm font-semibold transition-all">← Retour</button>
               <button @click="startGame"
-                class="px-8 py-3 bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-400 hover:to-emerald-400 rounded-xl font-bold text-white shadow-lg shadow-green-600/20 transition-all hover:scale-105">
-                {{ isSpectator ? '👁 Regarder la partie' : '🚀 Lancer la partie !' }}
+                :disabled="!isSpectator && !currentRoom.isSolo && (localReady || currentRoom.players.length < 2)"
+                :class="[
+                  'px-8 py-3 rounded-xl font-bold text-white shadow-lg transition-all',
+                  (!isSpectator && !currentRoom.isSolo && (localReady || currentRoom.players.length < 2))
+                    ? 'bg-gray-600 cursor-not-allowed opacity-70'
+                    : 'bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-400 hover:to-emerald-400 hover:scale-105 shadow-green-600/20'
+                ]">
+                <template v-if="isSpectator">👁 Regarder la partie</template>
+                <template v-else-if="currentRoom.isSolo">🚀 Lancer la partie !</template>
+                <template v-else-if="currentRoom.players.length < 2">⏳ En attente du Joueur 2…</template>
+                <template v-else-if="localReady && opponentReady">🎮 Lancement…</template>
+                <template v-else-if="localReady">⏳ En attente de l'adversaire…</template>
+                <template v-else-if="opponentReady">✅ Adversaire prêt — Clique pour lancer !</template>
+                <template v-else>🚀 Lancer la partie !</template>
               </button>
             </div>
           </div>

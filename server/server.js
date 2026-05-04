@@ -1145,6 +1145,9 @@ const socketToName = {};
 const nameToSocket = {};
 const socketToUser = {};
 
+// ── État "prêt à jouer" par room (synchro lancement de partie) ──
+const readyState   = {}; // { roomCode: Set<socketId> }
+
 // ── UNO state global (par roomCode) ──
 const unoRooms = {};
 
@@ -1362,6 +1365,30 @@ io.on('connection', (socket) => {
   });
 
   socket.on('game-action',     d => socket.to(d.roomCode).emit('opponent-action', d));
+
+  // ─── Synchro lancement de partie (les 2 joueurs doivent cliquer "Lancer") ───
+  socket.on('player-ready', ({ code, playerName }) => {
+    if (!code) return;
+    console.log(`🎯 ${playerName || socket.id} prêt dans la salle ${code}`);
+
+    if (!readyState[code]) readyState[code] = new Set();
+    readyState[code].add(socket.id);
+
+    // Prévenir les autres dans la salle (joueurs + spectateurs) que ce joueur est prêt
+    socket.to(code).emit('opponent-ready', { playerName });
+
+    // Combien de "vrais" joueurs sont dans la room ? (pas les spectateurs)
+    const room = rooms[code];
+    if (!room) return;
+    const requiredPlayers = Math.max(2, room.players.length); // au moins 2 pour les jeux multi
+
+    if (readyState[code].size >= requiredPlayers) {
+      console.log(`🚀 Tous prêts dans ${code} → game-start envoyé`);
+      io.to(code).emit('game-start');
+      delete readyState[code]; // reset pour permettre une nouvelle partie ensuite
+    }
+  });
+
   socket.on('channel-message', d => socket.broadcast.emit('channel-message', d));
   socket.on('send-invite', d => {
     const sid = nameToSocket[d.to];
@@ -1487,6 +1514,16 @@ io.on('connection', (socket) => {
         if (!room.players.length && !room.spectators.length) delete rooms[code];
       }
     }
+
+    // Nettoyer l'état "ready" + prévenir les autres joueurs de la room
+    for (const code in readyState) {
+      if (readyState[code].has(socket.id)) {
+        readyState[code].delete(socket.id);
+        socket.to(code).emit('player-left');
+        if (readyState[code].size === 0) delete readyState[code];
+      }
+    }
+
     delete socketToUser[socket.id];
     console.log(`[-] ${socket.id} (${name || '?'})`);
   });
