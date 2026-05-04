@@ -9,8 +9,7 @@ const props = defineProps({
 const emit = defineEmits(['close', 'play-match']);
 
 const Swal = window.Swal;
-const API  = 'http://localhost:3001';
-
+const API = import.meta.env.VITE_API_URL;
 // ── State ──
 const tournaments = ref([]);
 const loading = ref(false);

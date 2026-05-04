@@ -7,8 +7,8 @@ const props = defineProps({
 const emit = defineEmits(['close', 'joined']);
 
 const Swal = window.Swal;
-const API  = 'http://localhost:3001';
-
+const API = import.meta.env.VITE_API_URL;
+// const API  = '${import.meta.env.VITE_API_URL}';
 const code    = ref('');
 const joining = ref(false);
 const errMsg  = ref('');

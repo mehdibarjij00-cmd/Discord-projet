@@ -17,6 +17,8 @@ const UPLOADS_DIR      = path.join(DATA_DIR, 'uploads');
 const GROUPS_FILE      = path.join(DATA_DIR, 'groups.json');
 const USERS_FILE       = path.join(DATA_DIR, 'users.json');
 const TOURNAMENTS_FILE = path.join(DATA_DIR, 'tournaments.json');
+const DMS_FILE         = path.join(DATA_DIR, 'dms.json');
+
 
 if (!fs.existsSync(DATA_DIR))    fs.mkdirSync(DATA_DIR);
 if (!fs.existsSync(UPLOADS_DIR)) fs.mkdirSync(UPLOADS_DIR);
@@ -33,10 +35,12 @@ const saveJSON = (file, data) => {
 const users       = loadJSON(USERS_FILE, {});
 const groups      = loadJSON(GROUPS_FILE, {});
 const tournaments = loadJSON(TOURNAMENTS_FILE, {});
+const dms         = loadJSON(DMS_FILE, {});
 
 const persistGroups      = () => saveJSON(GROUPS_FILE, groups);
 const persistUsers       = () => saveJSON(USERS_FILE, users);
 const persistTournaments = () => saveJSON(TOURNAMENTS_FILE, tournaments);
+const persistDms         = () => saveJSON(DMS_FILE, dms); 
 
 // ── Utils ─────────────────────────────────────────────
 const makeAvatar = (seed) =>
@@ -139,7 +143,7 @@ const MAX_FILE_SIZE = 10 * 1024 * 1024;
 // =====================================================
 // TOURNOIS — utilitaires bracket
 // =====================================================
-const VALID_GAMES = ['pong', 'tictactoe', 'snake', 'penalty', 'sniper', 'uno'];
+const VALID_GAMES = ['pong', 'tictactoe', 'snake', 'penalty', 'uno'];
 
 const publicTournament = (t) => ({
   id: t.id, name: t.name, gameId: t.gameId, format: t.format,
@@ -723,6 +727,69 @@ if (req.method === 'PUT' && req.url === '/api/profile') {
       }
       user.username = name.trim();
     }
+    // ===============================
+    // ==  // ═════════════════ DIRECT MESSAGES (DMs) ═════════════════
+
+  // GET /api/dms/:userId → Liste des conversations d'un utilisateur
+  const dmsListMatch = req.url.match(/^\/api\/dms\/([^/]+)$/);
+  if (req.method === 'GET' && dmsListMatch) {
+    const userId = dmsListMatch[1];
+    const conversations = [];
+    
+    for (const [convId, messages] of Object.entries(dms)) {
+      if (convId.includes(userId) && messages.length > 0) {
+        const ids = convId.split('_');
+        const otherId = ids[0] === userId ? ids[1] : ids[0];
+        const otherUser = findUserById(otherId);
+        
+        if (otherUser) {
+          const lastMsg = messages[messages.length - 1];
+          conversations.push({
+            otherId: otherUser.id,
+            otherName: otherUser.username,
+            otherAvatar: otherUser.avatar,
+            lastMessage: { text: lastMsg.text, time: lastMsg.time, from: lastMsg.from },
+            unread: 0
+          });
+        }
+      }
+    }
+    
+    // Trier de la plus récente à la plus ancienne
+    conversations.sort((a, b) => new Date(b.lastMessage.time) - new Date(a.lastMessage.time));
+    
+    res.writeHead(200);
+    return res.end(JSON.stringify({ conversations }));
+  }
+
+  // GET /api/dms/:userId/:otherId → Historique précis
+  const dmHistMatch = req.url.match(/^\/api\/dms\/([^/]+)\/([^/]+)$/);
+  if (req.method === 'GET' && dmHistMatch) {
+    const userId = dmHistMatch[1];
+    const otherId = dmHistMatch[2];
+    
+    // ID unique : toujours trié alphabétiquement (ex: "id1_id2")
+    const convId = [userId, otherId].sort().join('_');
+    const otherUser = findUserById(otherId);
+    
+    if (!otherUser) {
+      res.writeHead(404); return res.end(JSON.stringify({ error: 'Utilisateur introuvable.' }));
+    }
+
+    const messages = dms[convId] || [];
+    res.writeHead(200);
+    return res.end(JSON.stringify({ 
+      messages,
+      other: { id: otherUser.id, username: otherUser.username, avatar: otherUser.avatar }
+    }));
+  }
+
+
+
+
+
+
+
     // Mise à jour des propriétés d'avatar
 
     if (typeof avatarStyle === 'string') user.avatarStyle = avatarStyle;
@@ -1219,6 +1286,43 @@ io.on('connection', (socket) => {
     io.to(`group-${groupId}`).emit('group-message', { groupId, message: msg });
   });
 
+
+
+
+  // =======================
+  // ─── Direct Messages (DM) ───
+  socket.on('dm-send', (data) => {
+    const { fromId, toId, fromName, fromAvatar, text } = data;
+    if (!text || !fromId || !toId) return;
+    
+    const convId = [String(fromId), String(toId)].sort().join('_');
+    
+    const msg = {
+      id: genId(),
+      from: String(fromId),
+      to: String(toId),
+      fromName,
+      fromAvatar,
+      text,
+      time: new Date().toISOString(),
+    };
+
+    if (!dms[convId]) dms[convId] = [];
+    dms[convId].push(msg);
+    if (dms[convId].length > 500) dms[convId] = dms[convId].slice(-500);
+    persistDms();
+
+    // Renvoie à l'expéditeur pour l'affichage
+    socket.emit('dm-message', { message: msg });
+    
+    // Envoie au destinataire (s'il est connecté)
+    io.to(`user-${toId}`).emit('dm-message', { message: msg });
+  });
+
+
+
+
+
   // ─── Salles de jeu génériques ───
   socket.on('join-game-room', (data) => {
     const code = typeof data === 'string' ? data : data.code;
@@ -1293,9 +1397,9 @@ io.on('connection', (socket) => {
   socket.on('webrtc-ice',    d => io.to(d.to).emit('webrtc-ice',    { from: socket.id, candidate: d.candidate }));
 
   // ─── SNIPER 1v1 ───
-  socket.on('sniper-state', d => socket.to(d.roomCode).emit('sniper-opponent-state', d));
-  socket.on('sniper-shot',  d => socket.to(d.roomCode).emit('sniper-opponent-shot',  d));
-  socket.on('sniper-hit',   d => socket.to(d.roomCode).emit('sniper-opponent-hit',   d));
+  // socket.on('sniper-state', d => socket.to(d.roomCode).emit('sniper-opponent-state', d));
+  // socket.on('sniper-shot',  d => socket.to(d.roomCode).emit('sniper-opponent-shot',  d));
+  // socket.on('sniper-hit',   d => socket.to(d.roomCode).emit('sniper-opponent-hit',   d));
 
   // ═══ UNO ═══
   socket.on('uno-start', ({ roomCode, players }) => {
@@ -1388,7 +1492,7 @@ io.on('connection', (socket) => {
   });
 });
 
-const PORT = 3001;
+const PORT = process.env.PORT || 3001;
 server.listen(PORT, () => {
   console.log(`\n🚀 ArenaLink Server → http://localhost:${PORT}`);
   console.log(`   📁 Data : ${DATA_DIR}`);

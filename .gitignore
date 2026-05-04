@@ -1,0 +1,30 @@
+﻿# Dépendances
+**/node_modules/
+
+# Variables d'environnement
+.env
+.env.*
+!.env.example
+!**/.env.example
+
+# Builds
+**/dist/
+**/build/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/
+
+# Docker
+.dockerignore.bak
+
+# Données utilisateur (générées en runtime, persistées via Docker volume / Render disk)
+server/data/

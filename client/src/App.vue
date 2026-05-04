@@ -10,7 +10,11 @@ import JoinGroupModal    from './views/Joingroupmodal.vue';
 import Tournaments       from './views/Tournaments.vue';
 
 const Swal = window.Swal;
-const API  = 'http://localhost:3001';
+const API = import.meta.env.VITE_API_URL;
+
+
+
+
 
 // ============================================================
 // SOCKET.IO
@@ -72,6 +76,21 @@ const groupMessages = ref([]);
 const newMessage    = ref('');
 const sending       = ref(false);
 
+// ============================================================
+// DIRECT MESSAGES (DM)
+// ============================================================
+const dmConversations = ref([]); // [{ otherId, otherName, otherAvatar, lastMessage, unread }]
+const activeDmUserId  = ref(null); // l'autre user avec qui on discute (null = pas en mode DM)
+const dmMessages      = ref([]); // historique de la conversation active
+const activeDmOther   = ref(null); // { id, username, avatar }
+
+// On est en mode DM si activeDmUserId est défini
+const isDmMode = computed(() => activeDmUserId.value !== null);
+
+const activeDm = computed(() =>
+  dmConversations.value.find(c => String(c.otherId) === String(activeDmUserId.value)) || null
+);
+
 const activeGroup = computed(() =>
   groups.value.find(g => g.id === activeGroupId.value) || null
 );
@@ -90,7 +109,7 @@ const loadGroups = async () => {
     const res  = await fetch(`${API}/api/groups/user/${currentUser.value.id}`);
     const data = await res.json();
     groups.value = data.groups || [];
-    if (groups.value.length && !activeGroupId.value) {
+    if (groups.value.length && !activeGroupId.value && !activeDmUserId.value) {
       selectGroup(groups.value[0]);
     }
   } catch {
@@ -98,8 +117,141 @@ const loadGroups = async () => {
   }
 };
 
+// ── Chargement DMs ──
+const loadDmConversations = async () => {
+  if (!currentUser.value.id) return;
+  try {
+    const res  = await fetch(`${API}/api/dms/${currentUser.value.id}`);
+    const data = await res.json();
+    dmConversations.value = data.conversations || [];
+  } catch {
+    dmConversations.value = [];
+  }
+};
+
+const openDm = async (otherUser) => {
+  if (!otherUser?.id) return;
+  // Empêcher de s'envoyer des messages à soi-même
+  if (String(otherUser.id) === String(currentUser.value.id)) return;
+
+  // Désélectionner le groupe actif
+  if (activeGroupId.value) {
+    socket.emit('group-unsubscribe', { groupId: activeGroupId.value });
+    activeGroupId.value = null;
+    groupMessages.value = [];
+  }
+
+  activeDmUserId.value = otherUser.id;
+  activeDmOther.value = {
+    id: otherUser.id,
+    username: otherUser.username || otherUser.name,
+    avatar: otherUser.avatar,
+  };
+
+  // Charger l'historique
+  try {
+    const res  = await fetch(`${API}/api/dms/${currentUser.value.id}/${otherUser.id}`);
+    const data = await res.json();
+    dmMessages.value = (data.messages || []).map(m => ({
+      ...m,
+      time: m.time ? new Date(m.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+    }));
+    if (data.other) activeDmOther.value = data.other;
+  } catch {
+    dmMessages.value = [];
+  }
+  scrollChatToBottom();
+
+  // Si la conversation n'est pas encore dans la liste (premier message), on l'ajoute
+  if (!dmConversations.value.find(c => String(c.otherId) === String(otherUser.id))) {
+    dmConversations.value.unshift({
+      otherId: otherUser.id,
+      otherName: activeDmOther.value.username,
+      otherAvatar: activeDmOther.value.avatar,
+      lastMessage: null,
+      unread: 0,
+    });
+  } else {
+    // Reset le compteur de non lus quand on ouvre la conversation
+    const conv = dmConversations.value.find(c => String(c.otherId) === String(otherUser.id));
+    if (conv) conv.unread = 0;
+  }
+};
+
+const closeDm = () => {
+  activeDmUserId.value = null;
+  activeDmOther.value = null;
+  dmMessages.value = [];
+};
+
+const sendDm = () => {
+  const text = newMessage.value.trim();
+  if (!text || !activeDmUserId.value) return;
+  sending.value = true;
+  socket.emit('dm-send', {
+    fromId:     currentUser.value.id,
+    toId:       activeDmUserId.value,
+    fromName:   currentUser.value.name,
+    fromAvatar: currentUser.value.avatar,
+    text,
+  });
+  newMessage.value = '';
+  setTimeout(() => sending.value = false, 200);
+};
+
+const onDmMessage = ({ message }) => {
+  // Vérifier si ce message me concerne
+  const meId    = String(currentUser.value.id);
+  const fromId  = String(message.from);
+  const toId    = String(message.to);
+  if (fromId !== meId && toId !== meId) return;
+
+  const otherId = fromId === meId ? toId : fromId;
+
+  // Mettre à jour l'aperçu dans la liste des conversations
+  let conv = dmConversations.value.find(c => String(c.otherId) === otherId);
+  if (!conv) {
+    // Nouvelle conversation reçue
+    conv = {
+      otherId,
+      otherName:   fromId === meId ? '' : message.fromName,
+      otherAvatar: fromId === meId ? '' : message.fromAvatar,
+      lastMessage: null,
+      unread: 0,
+    };
+    dmConversations.value.unshift(conv);
+    // Si on n'a pas le nom (cas où on a envoyé en premier), recharger
+    if (!conv.otherName) loadDmConversations();
+  }
+  conv.lastMessage = { text: message.text, time: message.time, from: message.from };
+
+  // Remonter cette conversation en tête de liste
+  dmConversations.value = [
+    conv,
+    ...dmConversations.value.filter(c => String(c.otherId) !== otherId),
+  ];
+
+  // Si la conversation est active → afficher le message
+  if (String(activeDmUserId.value) === otherId) {
+    dmMessages.value.push({
+      ...message,
+      time: message.time ? new Date(message.time).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '',
+    });
+    scrollChatToBottom();
+  } else if (fromId !== meId) {
+    // Notification si message reçu sur une conversation non active
+    conv.unread = (conv.unread || 0) + 1;
+  }
+};
+
 const selectGroup = async (group) => {
   if (!group) return;
+  // Fermer un DM actif s'il y en a un
+  if (activeDmUserId.value) {
+    activeDmUserId.value = null;
+    activeDmOther.value = null;
+    dmMessages.value = [];
+  }
   // Désabonner de l'ancien
   if (activeGroupId.value && activeGroupId.value !== group.id) {
     socket.emit('group-unsubscribe', { groupId: activeGroupId.value });
@@ -130,6 +282,11 @@ const scrollChatToBottom = () => {
 
 // ── Envoi de message ──
 const sendMessage = () => {
+  // Si on est en mode DM → utiliser sendDm
+  if (isDmMode.value) {
+    sendDm();
+    return;
+  }
   const text = newMessage.value.trim();
   if (!text || !activeGroupId.value) return;
   if (chatLocked.value) {
@@ -406,6 +563,7 @@ const handleLogin = async (userData) => {
   });
 
   await loadGroups();
+  await loadDmConversations();
 };
 
 onMounted(async () => {
@@ -423,6 +581,7 @@ onMounted(async () => {
           username: currentUser.value.name,
         });
         await loadGroups();
+        await loadDmConversations();
       }
     } catch {
       localStorage.removeItem('user');
@@ -438,6 +597,9 @@ onMounted(async () => {
   socket.on('group-banned',          onGroupBanned);
   socket.on('group-joined',          onGroupJoined);
   socket.on('group-message-error',   onMessageError);
+
+  // Direct Messages
+  socket.on('dm-message', onDmMessage);
 
   // WebRTC (déclenché par le voice)
   socket.on('user-joined-voice', async ({ socketId }) => {
@@ -642,7 +804,14 @@ watch(activeGroupId, () => scrollChatToBottom());
             <li
               v-for="m in (activeGroup.members || [])"
               :key="m.id"
-              class="px-2 py-1.5 rounded flex items-center gap-2 text-sm transition-colors hover:bg-gray-800"
+              @click="String(m.id) !== String(currentUser.id) && openDm(m)"
+              :class="[
+                'px-2 py-1.5 rounded flex items-center gap-2 text-sm transition-colors',
+                String(m.id) === String(currentUser.id)
+                  ? 'cursor-default'
+                  : 'hover:bg-gray-800 cursor-pointer'
+              ]"
+              :title="String(m.id) !== String(currentUser.id) ? `Envoyer un message privé à ${m.username}` : ''"
             >
               <img
                 :src="m.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${m.username}`"
@@ -653,6 +822,45 @@ watch(activeGroupId, () => scrollChatToBottom());
               </span>
               <span v-if="String(activeGroup.ownerId) === String(m.id)" class="text-xs">👑</span>
               <span v-else-if="activeGroup.admins?.map(String).includes(String(m.id))" class="text-xs">⭐</span>
+            </li>
+          </ul>
+        </div>
+
+        <!-- Messages privés (DMs) -->
+        <div v-if="dmConversations.length || isDmMode">
+          <h3 class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2 px-1 flex items-center justify-between">
+            <span>💬 Messages Privés</span>
+            <span class="text-gray-500 normal-case">{{ dmConversations.length }}</span>
+          </h3>
+          <ul class="space-y-1">
+            <li
+              v-for="conv in dmConversations"
+              :key="conv.otherId"
+              @click="openDm({ id: conv.otherId, username: conv.otherName, avatar: conv.otherAvatar })"
+              :class="[
+                'px-2 py-1.5 rounded flex items-center gap-2 text-sm transition-colors cursor-pointer',
+                String(activeDmUserId) === String(conv.otherId)
+                  ? 'bg-indigo-500/20 text-white'
+                  : 'hover:bg-gray-800 text-gray-300'
+              ]"
+            >
+              <img
+                :src="conv.otherAvatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${conv.otherName}`"
+                class="w-7 h-7 rounded-full bg-gray-700 flex-shrink-0"
+              />
+              <div class="flex-1 min-w-0">
+                <p class="truncate text-sm font-medium">{{ conv.otherName }}</p>
+                <p v-if="conv.lastMessage" class="text-[11px] text-gray-500 truncate">
+                  <span v-if="String(conv.lastMessage.from) === String(currentUser.id)" class="text-gray-600">Toi : </span>
+                  {{ conv.lastMessage.text }}
+                </p>
+              </div>
+              <span
+                v-if="conv.unread > 0"
+                class="bg-red-500 text-white text-[10px] font-bold rounded-full px-1.5 min-w-[18px] h-[18px] flex items-center justify-center flex-shrink-0"
+              >
+                {{ conv.unread > 9 ? '9+' : conv.unread }}
+              </span>
             </li>
           </ul>
         </div>
@@ -759,14 +967,33 @@ watch(activeGroupId, () => scrollChatToBottom());
     <main v-else class="flex-1 flex flex-col bg-gray-800 relative">
 
       <header class="h-14 px-6 flex items-center justify-between border-b border-gray-900 shadow-sm bg-gray-800 z-10">
-        <div class="flex items-center gap-2 min-w-0">
+        <!-- Header en mode DM -->
+        <div v-if="isDmMode" class="flex items-center gap-2 min-w-0">
+          <span class="text-2xl">@</span>
+          <img
+            :src="activeDmOther?.avatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${activeDmOther?.username}`"
+            class="w-7 h-7 rounded-full bg-gray-700"
+          />
+          <h2 class="font-bold text-white truncate">{{ activeDmOther?.username }}</h2>
+          <span class="text-xs text-gray-500">· Message privé</span>
+        </div>
+        <!-- Header en mode groupe -->
+        <div v-else class="flex items-center gap-2 min-w-0">
           <span class="text-2xl text-gray-500">#</span>
           <h2 class="font-bold text-white truncate">{{ activeGroup?.name || 'Pas de groupe' }}</h2>
           <span v-if="activeGroup?.chatLocked" class="text-xs text-yellow-400">🔒 Verrouillé</span>
         </div>
         <div class="flex items-center gap-2">
           <button
-            v-if="activeGroup"
+            v-if="isDmMode"
+            @click="closeDm"
+            class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg font-bold transition-all"
+            title="Fermer la conversation"
+          >
+            ✕
+          </button>
+          <button
+            v-if="activeGroup && !isDmMode"
             @click="showGroupSettings = true"
             class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 text-gray-300 text-xs rounded-lg font-bold transition-all"
             title="Paramètres du groupe"
@@ -783,7 +1010,7 @@ watch(activeGroupId, () => scrollChatToBottom());
       </header>
 
       <!-- Messages -->
-      <div v-if="activeGroup" id="chat-box" class="flex-1 overflow-y-auto p-6 flex flex-col gap-3">
+      <div v-if="activeGroup && !isDmMode" id="chat-box" class="flex-1 overflow-y-auto p-6 flex flex-col gap-3">
         <div v-if="!groupMessages.length" class="text-center text-gray-500 mt-10">
           <p class="text-4xl mb-2">💬</p>
           <p class="text-sm">Pas de messages. Sois le premier à écrire !</p>
@@ -817,6 +1044,37 @@ watch(activeGroupId, () => scrollChatToBottom());
         </template>
       </div>
 
+      <!-- Messages DM -->
+      <div v-else-if="isDmMode" id="chat-box" class="flex-1 overflow-y-auto p-6 flex flex-col gap-3">
+        <div v-if="!dmMessages.length" class="text-center text-gray-500 mt-10">
+          <p class="text-4xl mb-2">💬</p>
+          <p class="text-sm">Début de votre conversation avec <b class="text-indigo-400">{{ activeDmOther?.username }}</b></p>
+          <p class="text-xs mt-1">Envoie le premier message !</p>
+        </div>
+        <div
+          v-for="msg in dmMessages"
+          :key="msg.id"
+          class="flex gap-3 hover:bg-gray-900/40 p-2 -mx-2 rounded transition-colors"
+        >
+          <img
+            :src="msg.fromAvatar || `https://api.dicebear.com/7.x/avataaars/svg?seed=${msg.fromName}`"
+            class="w-10 h-10 rounded-full bg-gray-700 mt-0.5 flex-shrink-0"
+          />
+          <div class="flex flex-col min-w-0">
+            <div class="flex items-baseline gap-2">
+              <span
+                class="font-medium"
+                :class="String(msg.from) === String(currentUser.id) ? 'text-indigo-400' : 'text-white'"
+              >
+                {{ String(msg.from) === String(currentUser.id) ? 'Toi' : msg.fromName }}
+              </span>
+              <span class="text-xs text-gray-500">{{ msg.time }}</span>
+            </div>
+            <p class="text-gray-300 mt-0.5 leading-relaxed break-words">{{ msg.text }}</p>
+          </div>
+        </div>
+      </div>
+
       <!-- Empty state -->
       <div v-else class="flex-1 flex flex-col items-center justify-center text-center p-8">
         <div class="text-6xl mb-4">🎮</div>
@@ -841,7 +1099,7 @@ watch(activeGroupId, () => scrollChatToBottom());
       </div>
 
       <!-- Input chat -->
-      <div v-if="activeGroup" class="px-6 pb-6 pt-2">
+      <div v-if="activeGroup && !isDmMode" class="px-6 pb-6 pt-2">
         <div
           class="rounded-xl flex items-center px-4 py-3 gap-3 transition-colors"
           :class="chatLocked ? 'bg-gray-800 opacity-60' : 'bg-gray-700'"
@@ -859,6 +1117,26 @@ watch(activeGroupId, () => scrollChatToBottom());
           <button
             @click="sendMessage"
             :disabled="chatLocked || !newMessage.trim()"
+            class="text-indigo-400 font-bold hover:text-indigo-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+          >
+            Envoyer
+          </button>
+        </div>
+      </div>
+
+      <!-- Input DM -->
+      <div v-if="isDmMode" class="px-6 pb-6 pt-2">
+        <div class="rounded-xl flex items-center px-4 py-3 gap-3 bg-gray-700">
+          <input
+            v-model="newMessage"
+            @keyup.enter="sendMessage"
+            type="text"
+            :placeholder="`Envoyer un message à @${activeDmOther?.username}…`"
+            class="flex-1 bg-transparent text-white focus:outline-none placeholder-gray-400"
+          />
+          <button
+            @click="sendMessage"
+            :disabled="!newMessage.trim()"
             class="text-indigo-400 font-bold hover:text-indigo-300 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             Envoyer

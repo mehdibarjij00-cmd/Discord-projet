@@ -22,7 +22,7 @@ const emit = defineEmits(['quit', 'win', 'loss']);
 let socket = props.socket;
 let ownsSocket = false;
 if (!socket) {
-  socket = io('http://localhost:3001');
+socket = io(import.meta.env.VITE_API_URL);
   ownsSocket = true;
 }
 

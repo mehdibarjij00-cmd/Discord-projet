@@ -29,8 +29,8 @@ const handleCreate = async () => {
 
   try {
     console.log('[CreateGroup] fetch start');
-    const response = await fetch('http://localhost:3001/api/groups/create', {
-      method: 'POST',
+    const response = await fetch(`${import.meta.env.VITE_API_URL}/api/groups/create`, {
+    method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name:      groupName.value.trim(),
@@ -60,7 +60,7 @@ const handleCreate = async () => {
     emit('close'); // 🔑 On ferme la modale nous-mêmes au cas où le parent oublie
   } catch (e) {
     console.error('[CreateGroup] fetch error', e);
-    errorMsg.value = 'Serveur inaccessible (port 3001 ?). ' + (e?.message || '');
+    errorMsg.value = 'Serveur inaccessible (?). ' + (e?.message || '');
   } finally {
     creating.value = false;
   }

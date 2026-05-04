@@ -313,7 +313,7 @@ let socket = null;
 
 onMounted(() => {
   initPlayer();
-  socket = io('http://localhost:3001');
+socket = io(import.meta.env.VITE_API_URL);
 
   socket.on('game-status', (data) => {
     if (data.status === 'ready') {

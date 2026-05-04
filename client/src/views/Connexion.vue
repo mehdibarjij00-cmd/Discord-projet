@@ -27,8 +27,9 @@ const handleSubmit = async () => {
   try {
     if (isLoginMode.value) {
       // ── CONNEXION ──────────────────────────────────────
-      const res  = await fetch('http://localhost:3001/api/login', {
-        method:  'POST',
+      // const response = await fetch(`${import.meta.env.VITE_API_URL}/api/groups/${id}`, { ... });
+          const res = await fetch(`${import.meta.env.VITE_API_URL}/api/login`, 
+        { method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ email: form.email, password: form.password }),
       });
@@ -70,7 +71,8 @@ const handleSubmit = async () => {
         return;
       }
 
-      const res  = await fetch('http://localhost:3001/api/register', {
+      const res = await fetch(`${import.meta.env.VITE_API_URL}/api/register`, 
+      {
         method:  'POST',
         headers: { 'Content-Type': 'application/json' },
         body:    JSON.stringify({ username: form.username, email: form.email, password: form.password }),
@@ -102,7 +104,7 @@ const handleSubmit = async () => {
     Swal.fire({
       icon:               'error',
       title:              'Serveur inaccessible',
-      html:               'Vérifie que ton backend Node.js tourne bien sur le <b>port 3001</b>.',
+      html:               'Vérifie que ton backend Node.js tourne bien  </b>.',
       background:         '#111827',
       color:              '#f9fafb',
       confirmButtonColor: '#6366f1',

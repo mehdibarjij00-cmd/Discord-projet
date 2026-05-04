@@ -59,8 +59,8 @@ const save = async () => {
     console.log('[Profil] Sauvegarde, userId =', userId, profileData);
 
     if (userId) {
-      const res = await fetch('http://localhost:3001/api/profile', {
-        method: 'PUT',
+        const res = await fetch(`${import.meta.env.VITE_API_URL}/api/profile`, 
+         {        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userId,

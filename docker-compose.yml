@@ -1,0 +1,25 @@
+version: '3.9'
+services:
+  server:
+    build: ./server
+    container_name: arenalink-server
+    ports:
+      - "3001:3001"
+    volumes:
+      - ./server/data:/app/data
+    environment:
+      - NODE_ENV=production
+      - PORT=3001
+    restart: unless-stopped
+
+  client:
+    build:
+      context: ./client
+      args:
+        VITE_API_URL: http://localhost:3001
+    container_name: arenalink-client
+    ports:
+      - "80:80"
+    depends_on:
+      - server
+    restart: unless-stopped

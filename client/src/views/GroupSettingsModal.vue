@@ -8,8 +8,7 @@ const props = defineProps({
 const emit = defineEmits(['close', 'updated', 'left', 'deleted']);
 
 const Swal = window.Swal;
-const API  = 'http://localhost:3001';
-
+const API = import.meta.env.VITE_API_URL;
 const tab = ref('general'); // general | members | bans
 
 // ── Helpers ──
