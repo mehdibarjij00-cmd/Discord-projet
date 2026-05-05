@@ -1,26 +1,28 @@
 import { ref } from 'vue';
 
-// ─── Serveurs ICE : STUN + TURN publics (Open Relay by Metered) ───────────────
-// Ces serveurs TURN sont nécessaires pour les connexions entre deux réseaux
-// différents (deux PCs chez deux personnes différentes).
+// ─── Serveurs ICE : STUN alternatifs + TURN sur port 443 TCP ─────────────────
+// Port 443 TCP passe partout (même derrière des firewalls stricts).
+// On évite stun.l.google.com qui est souvent bloqué (erreur 701).
 const ICE_SERVERS = {
   iceServers: [
-    // STUN (découverte d'IP publique)
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    // TURN gratuits Open Relay (Metered) — relay quand le P2P direct échoue
+    // STUN alternatifs (pas Google, plus fiables sur réseaux restrictifs)
+    { urls: 'stun:stun.cloudflare.com:3478' },
+    { urls: 'stun:stun.stunprotocol.org:3478' },
+    // TURN Metered — UDP port 80 (fallback rapide)
     {
       urls: 'turn:openrelay.metered.ca:80',
       username: 'openrelayproject',
       credential: 'openrelayproject',
     },
+    // TURN Metered — TCP port 443 (passe tous les firewalls)
     {
-      urls: 'turn:openrelay.metered.ca:443',
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
       username: 'openrelayproject',
       credential: 'openrelayproject',
     },
+    // TURN Metered — TLS port 443 (relay chiffré, dernier recours)
     {
-      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      urls: 'turns:openrelay.metered.ca:443?transport=tcp',
       username: 'openrelayproject',
       credential: 'openrelayproject',
     },
