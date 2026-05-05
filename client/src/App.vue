@@ -527,11 +527,15 @@ const disconnectVoice = async () => {
 const createPeerConnection = (remoteSocketId) => {
   const pc = new RTCPeerConnection(ICE_SERVERS);
   peerConnections[remoteSocketId] = pc;
+  pc.oniceconnectionstatechange = () => console.log(`🧊 ICE [${remoteSocketId.slice(0,6)}]:`, pc.iceConnectionState);
+  pc.onconnectionstatechange = () => console.log(`🔗 CONN [${remoteSocketId.slice(0,6)}]:`, pc.connectionState);
+  pc.onsignalingstatechange = () => console.log(`📡 SIG [${remoteSocketId.slice(0,6)}]:`, pc.signalingState);
   localStream?.getTracks().forEach(t => pc.addTrack(t, localStream));
   pc.onicecandidate = ({ candidate }) => {
     if (candidate) socket.emit('webrtc-ice', { to: remoteSocketId, candidate });
   };
   pc.ontrack = ({ streams }) => {
+    console.log(`🔊 ONTRACK reçu de ${remoteSocketId.slice(0,6)}, streams:`, streams);
     const audio = new Audio();
     audio.srcObject = streams[0];
     audio.setAttribute('data-remote', remoteSocketId);
