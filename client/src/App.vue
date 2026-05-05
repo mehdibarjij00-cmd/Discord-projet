@@ -446,7 +446,30 @@ const isDeafened     = ref(false);
 
 let localStream       = null;
 const peerConnections = {};
-const ICE_SERVERS = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+// STUN + TURN — STUN seul suffit en local mais ~15-30% des connexions
+// échouent entre 2 utilisateurs distants (NATs symétriques, 4G, etc.)
+// Le TURN sert de relais quand le P2P direct ne passe pas.
+// Open Relay Project = TURN gratuit pour le dev/démo.
+const ICE_SERVERS = {
+  iceServers: [
+    { urls: 'stun:stun.l.google.com:19302' },
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+  ],
+};
 
 const joinVoiceChannel = async (channelId) => {
   if (connectedVoice.value?.id === channelId) {
