@@ -1,7 +1,30 @@
 import { ref } from 'vue';
 
+// ─── Serveurs ICE : STUN + TURN publics (Open Relay by Metered) ───────────────
+// Ces serveurs TURN sont nécessaires pour les connexions entre deux réseaux
+// différents (deux PCs chez deux personnes différentes).
 const ICE_SERVERS = {
-  iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+  iceServers: [
+    // STUN (découverte d'IP publique)
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    // TURN gratuits Open Relay (Metered) — relay quand le P2P direct échoue
+    {
+      urls: 'turn:openrelay.metered.ca:80',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+    {
+      urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+      username: 'openrelayproject',
+      credential: 'openrelayproject',
+    },
+  ],
 };
 
 export function useVoice(socket, currentUser) {
@@ -10,6 +33,11 @@ export function useVoice(socket, currentUser) {
 
   // — Crée un RTCPeerConnection avec un pair distant
   const createPeerConnection = (remoteSocketId) => {
+    // Fermer l'ancienne connexion si elle existe déjà (évite les doublons)
+    if (peers[remoteSocketId]) {
+      peers[remoteSocketId].close();
+    }
+
     const pc = new RTCPeerConnection(ICE_SERVERS);
     peers[remoteSocketId] = pc;
 
@@ -21,12 +49,22 @@ export function useVoice(socket, currentUser) {
       if (candidate) socket.emit('webrtc-ice', { to: remoteSocketId, candidate });
     };
 
+    // Log utile pour déboguer les problèmes de connexion
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC] ICE state avec ${remoteSocketId}: ${pc.iceConnectionState}`);
+    };
+
     // Jouer l'audio reçu du pair distant
     pc.ontrack = ({ streams }) => {
+      // Supprimer l'ancien élément audio si existant
+      document.querySelector(`audio[data-remote="${remoteSocketId}"]`)?.remove();
+
       const audio = new Audio();
       audio.srcObject = streams[0];
       audio.dataset.remote = remoteSocketId;
-      audio.play().catch(console.warn);
+      // autoplay nécessite une interaction utilisateur préalable (déjà le cas via joinVoiceRoom)
+      audio.play().catch(err => console.warn('[WebRTC] audio.play() bloqué:', err));
+      document.body.appendChild(audio); // IMPORTANT : l'élément doit être dans le DOM
     };
 
     return pc;
@@ -34,6 +72,13 @@ export function useVoice(socket, currentUser) {
 
   // — Rejoindre un salon vocal
   const joinVoiceRoom = async (roomId) => {
+    // Retirer les anciens listeners avant d'en ajouter de nouveaux (évite les doublons)
+    socket.off('user-joined-voice');
+    socket.off('webrtc-offer');
+    socket.off('webrtc-answer');
+    socket.off('webrtc-ice');
+    socket.off('user-left-voice');
+
     try {
       localStream.value = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
     } catch (err) {
@@ -70,7 +115,7 @@ export function useVoice(socket, currentUser) {
       try {
         await peers[from]?.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (e) {
-        console.warn('ICE error:', e);
+        console.warn('[WebRTC] ICE candidate error:', e);
       }
     });
 
@@ -95,7 +140,7 @@ export function useVoice(socket, currentUser) {
 
     socket.emit('leave-voice', { roomId });
 
-    // Retirer les listeners pour éviter les doublons si on rejoint plus tard
+    // Retirer les listeners
     socket.off('user-joined-voice');
     socket.off('webrtc-offer');
     socket.off('webrtc-answer');
