@@ -10,9 +10,12 @@ import JoinGroupModal    from './views/Joingroupmodal.vue';
 import Tournaments       from './views/Tournaments.vue';
 
 const Swal = window.Swal;
-const API = import.meta.env.VITE_API_URL;
+// const API = import.meta.env.VITE_API_URL;
 
-
+const API = import.meta.env.VITE_API_URL
+  || (window.location.hostname === 'arenalink-client.onrender.com'
+      ? 'https://arenalink-server.onrender.com'
+      : 'http://localhost:3001');
 
 
 
